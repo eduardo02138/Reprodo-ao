@@ -51,6 +51,21 @@ Alexa / Echo / Fire TV / grupo "Tudo"
 
 ---
 
+## Capturas de Tela do Menu
+
+<p align="center">
+  <img src="docs/images/popup-menu-connected.png" width="340" alt="Menu Popup Conectado - Tocando no Spotify e Alexas">
+  &nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="docs/images/popup-menu-setup.png" width="340" alt="Menu Popup - Configuração do Spotify Client ID">
+</p>
+
+<p align="center">
+  <em>Esquerda: Menu ativo com reprodução sincronizada, Alexas conectadas e controle de volume.<br>
+  Direita: Card de configuração intuitiva do Spotify Client ID e Redirect URI.</em>
+</p>
+
+---
+
 ## Destaques
 
 | Recurso | O que faz |
