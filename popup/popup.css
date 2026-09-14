@@ -820,6 +820,7 @@ input:checked + .slider:before {
 .actions {
   display: flex;
   flex-direction: column;
+  gap: 8px;
 }
 
 .btn-primary {
@@ -854,6 +855,27 @@ input:checked + .slider:before {
   color: #666;
   cursor: not-allowed;
   box-shadow: none;
+}
+
+.btn-restore-yt {
+  background: transparent;
+  border: 1px solid #333;
+  color: #a7a7a7;
+  padding: 6px 12px;
+  border-radius: 500px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.15s ease;
+}
+
+.btn-restore-yt:hover {
+  border-color: #555;
+  color: #fff;
+  background: #1e1e1e;
 }
 
 /* ───── Configurações Avançadas e Diagnóstico (Gaveta) ───── */

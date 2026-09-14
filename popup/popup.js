@@ -36,6 +36,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   const handoffBtn = document.getElementById('handoff-btn');
   const handoffBtnText = document.getElementById('handoff-btn-text');
   const handoffSpinner = document.getElementById('handoff-spinner');
+  const restoreYtBtn = document.getElementById('restore-yt-btn');
   const statusBox = document.getElementById('status-message');
   const closeBtn = document.getElementById('close-btn');
 
@@ -349,6 +350,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       renderAuthState();
     }
     if (changes.lastHandoffResult) renderLastHandoff(changes.lastHandoffResult.newValue);
+    if (changes.currentTrack && changes.currentTrack.newValue) {
+      updateTrackDisplay(changes.currentTrack.newValue);
+    }
   });
 
   // ───── 5. Query active tab ─────
@@ -434,7 +438,8 @@ document.addEventListener('DOMContentLoaded', async () => {
       const state = await provider.getPlaybackState();
       if (state) {
         setPlayingVisuals(state.is_playing);
-        if (state.item) {
+        // Only update title/artist from Spotify if there is no active track detected from YouTube
+        if (state.item && !currentTrack) {
           trackTitleEl.textContent = state.item.name;
           trackArtistEl.textContent = state.item.artists.map(a => a.name).join(', ');
           if (state.item.album?.images?.[0]?.url) {
@@ -444,8 +449,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
         if (state.device) {
-          // Update display only — don't overwrite user's saved preference
-          targetDeviceLabel.textContent = state.device.name;
+          // Update volume slider if on active device, but NEVER overwrite the user's selected targetDeviceLabel
           if (state.device.volume_percent !== null) {
             volumeSlider.value = state.device.volume_percent;
             volValText.textContent = `${state.device.volume_percent}%`;
@@ -602,12 +606,22 @@ document.addEventListener('DOMContentLoaded', async () => {
 
       deviceListEl.innerHTML = '';
 
+      // Deterministic target selection:
+      // 1. User's saved preference if still in list
+      // 2. "Tudo" device if present
+      // 3. Currently active device
+      // 4. First device in list
+      const preferredId = selectedDeviceId && devices.some(d => d.id === selectedDeviceId)
+        ? selectedDeviceId
+        : (devices.find(d => d.name.toLowerCase().includes('tudo'))?.id ||
+           devices.find(d => d.is_active)?.id ||
+           devices[0]?.id);
+
       devices.forEach(dev => {
         const item = document.createElement('div');
         item.className = 'device-item';
 
-        const isCurrent = (selectedDeviceId && dev.id === selectedDeviceId) ||
-                          (!selectedDeviceId && dev.name.toLowerCase().includes('tudo'));
+        const isCurrent = dev.id === preferredId;
 
         if (isCurrent) {
           item.classList.add('active');
@@ -631,12 +645,19 @@ document.addEventListener('DOMContentLoaded', async () => {
             <span class="device-name">${escapeHtml(dev.name)}</span>
             <span class="device-status">${escapeHtml(dev.type)} • ${dev.is_active ? 'Em reprodução' : 'Disponível'}</span>
           </div>
-          <span class="radio-indicator"></span>
+          <span class="radio-indicator">${isCurrent ? '●' : '○'}</span>
         `;
 
         item.addEventListener('click', async () => {
-          document.querySelectorAll('.device-item').forEach(d => d.classList.remove('active'));
+          document.querySelectorAll('.device-item').forEach(d => {
+            d.classList.remove('active');
+            const ind = d.querySelector('.radio-indicator');
+            if (ind) ind.textContent = '○';
+          });
           item.classList.add('active');
+          const myInd = item.querySelector('.radio-indicator');
+          if (myInd) myInd.textContent = '●';
+
           selectedDeviceId = dev.id;
           selectedDeviceName = dev.name;
           targetDeviceLabel.textContent = dev.name;
@@ -663,7 +684,32 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // ───── 12. Manual Handoff ─────
+  // ───── 12. Manual Handoff & Restore YouTube ─────
+  if (restoreYtBtn) {
+    restoreYtBtn.addEventListener('click', async () => {
+      try {
+        let tab = activeTab;
+        if (!tab || !/^https:\/\/(www|music)\.youtube\.com\//.test(tab.url || '')) {
+          const [ytTab] = await chrome.tabs.query({ url: ['*://*.youtube.com/*', '*://music.youtube.com/*'] });
+          tab = ytTab;
+        }
+        if (!tab) {
+          showStatus('Nenhuma aba do YouTube aberta', '#f39c12');
+          return;
+        }
+        chrome.tabs.sendMessage(tab.id, { type: 'RESTORE_YOUTUBE' }, (res) => {
+          if (chrome.runtime.lastError) {
+            showStatus('Aba do YouTube precisa ser recarregada (F5)', '#ff5555');
+          } else {
+            showStatus('↺ Som e vídeo do YouTube reativados!', '#1db954');
+          }
+        });
+      } catch (e) {
+        showStatus('Erro ao reativar YouTube', '#ff5555');
+      }
+    });
+  }
+
   handoffBtn.addEventListener('click', () => {
     if (!currentTrack) return;
 
