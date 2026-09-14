@@ -31,9 +31,9 @@ async function markAuthRequired() {
 // Automatic login: after the user authorized the app once, a lost session is recovered without
 // a window. Call it while holding the refresh lock so two contexts never run the flow together.
 export async function trySilentLogin() {
-  const { spotifyAuthorizedOnce, lastSilentLoginAt = 0 } =
-    await chrome.storage.local.get(['spotifyAuthorizedOnce', 'lastSilentLoginAt']);
-  if (!spotifyAuthorizedOnce || typeof chrome.identity?.launchWebAuthFlow !== 'function') return null;
+  const { spotifyAuthorizedOnce, autoReauthDisabled, lastSilentLoginAt = 0 } =
+    await chrome.storage.local.get(['spotifyAuthorizedOnce', 'autoReauthDisabled', 'lastSilentLoginAt']);
+  if (!spotifyAuthorizedOnce || autoReauthDisabled || typeof chrome.identity?.launchWebAuthFlow !== 'function') return null;
   if (Date.now() - lastSilentLoginAt < SILENT_LOGIN_COOLDOWN_MS) return null;
 
   await chrome.storage.local.set({ lastSilentLoginAt: Date.now() });
@@ -45,6 +45,7 @@ export async function trySilentLogin() {
     return null;
   }
 }
+
 
 export class SpotifyClient {
   constructor() {

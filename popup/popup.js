@@ -191,8 +191,9 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // Automatic login: if the app was authorized before, recover a lost session without a window
   async function tryAutomaticLogin() {
-    const { spotifyAuthorizedOnce } = await chrome.storage.local.get('spotifyAuthorizedOnce');
-    if (isConnected || !identityAvailable || !spotifyAuthorizedOnce) return false;
+    const { spotifyAuthorizedOnce, autoReauthDisabled } =
+      await chrome.storage.local.get(['spotifyAuthorizedOnce', 'autoReauthDisabled']);
+    if (isConnected || !identityAvailable || !spotifyAuthorizedOnce || autoReauthDisabled) return false;
 
     authIndicator.textContent = 'Spotify: entrando automaticamente…';
     authBtn.disabled = true;
@@ -201,6 +202,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     await renderAuthState();
     return !!res?.success;
   }
+
 
   authBtn.addEventListener('click', () => {
     if (isConnected) {

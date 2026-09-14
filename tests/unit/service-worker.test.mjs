@@ -402,6 +402,7 @@ test('logout removes the tokens', async () => {
   assert.equal(storage.spotify_access_token, undefined);
   assert.equal(storage.spotify_refresh_token, undefined);
   assert.equal(storage.engineState, 'AUTH_REQUIRED');
+  assert.equal(storage.autoReauthDisabled, true);
 });
 
 test('after logout the automatic login stays off', async () => {
@@ -412,6 +413,100 @@ test('after logout the automatic login stays off', async () => {
   assert.equal(res.handoff.errorCode, 'AUTH_REQUIRED');
   assert.equal(calls, 0);
   assert.equal(storage.spotifyAuthorizedOnce, false);
+  assert.equal(storage.autoReauthDisabled, true);
+});
+
+// ── Strict AUTH Test Suite (AUTH-01 through AUTH-04) ──
+test('AUTH-01: refresh normal recupera access token sem executar launchWebAuthFlow', async () => {
+  let webAuthFlowCalls = 0;
+  identityHandler = () => {
+    webAuthFlowCalls++;
+    return 'https://testextid.chromiumapp.org/spotify?code=good-code&state=x';
+  };
+  // Token expirado mas refresh token válido
+  storage.spotify_token_expires_at = Date.now() - 1000;
+  storage.spotify_refresh_token = S.validRefresh;
+  delete storage.autoReauthDisabled;
+
+  const client = new SpotifyClient();
+  const token = await client.getAccessToken();
+
+  assert.ok(token);
+  assert.equal(token, S.validAccess);
+  assert.equal(webAuthFlowCalls, 0, 'Refresh normal não deve chamar launchWebAuthFlow');
+});
+
+test('AUTH-02: invalid_grant -> silent auth funciona se Spotify puder redirecionar sem interacao', async () => {
+  let detailsCaptured;
+  identityHandler = (url, details) => {
+    detailsCaptured = details;
+    const state = new URL(url).searchParams.get('state');
+    return `https://testextid.chromiumapp.org/spotify?code=good-code&state=${state}`;
+  };
+  storage.lastSilentLoginAt = 0;
+  storage.spotifyAuthorizedOnce = true;
+  delete storage.autoReauthDisabled;
+  Object.assign(storage, { spotify_refresh_token: 'revoked', spotify_token_expires_at: 0 });
+
+  const client = new SpotifyClient();
+  const token = await client.getAccessToken();
+
+  assert.ok(token);
+  assert.equal(detailsCaptured.interactive, false, 'Silent re-auth deve ser não-interativo');
+  assert.equal(storage.spotify_access_token, S.validAccess);
+  assert.equal(storage.engineState, 'READY');
+});
+
+test('AUTH-03: silent auth exige UI -> fica AUTH_REQUIRED, sem abrir janela escondida nem loopar', async () => {
+  let calls = 0;
+  identityHandler = (url, details) => {
+    calls++;
+    assert.equal(details.interactive, false, 'Tentativa automática não pode ser interativa');
+    throw new Error('User interaction required');
+  };
+  storage.lastSilentLoginAt = 0;
+  storage.spotifyAuthorizedOnce = true;
+  delete storage.autoReauthDisabled;
+  Object.assign(storage, { spotify_refresh_token: 'revoked', spotify_token_expires_at: 0 });
+
+  const client = new SpotifyClient();
+  await assert.rejects(
+    () => client.getAccessToken(),
+    (err) => err.message.startsWith('AUTH_REQUIRED')
+  );
+
+  assert.equal(calls, 1, 'Deve tentar exatamente uma vez');
+  assert.equal(storage.engineState, 'AUTH_REQUIRED');
+  assert.equal(storage.spotify_access_token, undefined);
+  assert.ok(Date.now() - storage.lastSilentLoginAt < 5000, 'Cooldown de 2 minutos deve ser persistido em storage');
+});
+
+test('AUTH-04: usuario clica Desconectar -> nenhuma tentativa automatica ocorre depois, mesmo apos 401/reload', async () => {
+  let webAuthFlowCalls = 0;
+  identityHandler = () => {
+    webAuthFlowCalls++;
+    return 'https://testextid.chromiumapp.org/spotify?code=good-code&state=x';
+  };
+  storage.lastSilentLoginAt = 0;
+
+  // Usuário desconecta explicitamente
+  const logoutRes = await send({ type: 'SPOTIFY_LOGOUT' }, {});
+  assert.equal(logoutRes.success, true);
+  assert.equal(storage.autoReauthDisabled, true);
+  assert.equal(storage.spotifyAuthorizedOnce, false);
+
+  // Simula detecção de música no YouTube após 401 ou reload de página
+  const detectRes = await detect('Never Gonna Give You Up', 'Rick Astley', 'page-after-logout');
+  assert.equal(detectRes.handoff.errorCode, 'AUTH_REQUIRED');
+  assert.equal(webAuthFlowCalls, 0, 'Nenhuma tentativa automática deve ocorrer após logout explícito');
+
+  // Simula cliente tentando getAccessToken diretamente
+  const client = new SpotifyClient();
+  await assert.rejects(
+    () => client.getAccessToken(),
+    (err) => err.message.startsWith('AUTH_REQUIRED')
+  );
+  assert.equal(webAuthFlowCalls, 0, 'Cliente não deve disparar silent login após logout explícito');
 });
 
 test('telemetry keeps every event written concurrently', async () => {
@@ -419,3 +514,4 @@ test('telemetry keeps every event written concurrently', async () => {
   await Promise.all(Array.from({ length: 30 }, (_, i) => logTelemetry(`EVT_${i}`)));
   assert.equal(storage.telemetryLogs.length, 30);
 });
+
