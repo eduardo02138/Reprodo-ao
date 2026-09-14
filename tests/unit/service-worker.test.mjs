@@ -343,6 +343,18 @@ test('login with a mismatching state is rejected and stores nothing', async () =
   assert.match(storage.authError, /state/);
 });
 
+test('login in a browser without chrome.identity fails with a clear message', async () => {
+  const identity = chrome.identity;
+  delete chrome.identity;
+  try {
+    const res = await send({ type: 'SPOTIFY_LOGIN' }, {});
+    assert.equal(res.success, false);
+    assert.match(res.message, /chrome\.identity/);
+  } finally {
+    chrome.identity = identity;
+  }
+});
+
 test('logout removes the tokens', async () => {
   const res = await send({ type: 'SPOTIFY_LOGOUT' }, {});
   assert.equal(res.success, true);
