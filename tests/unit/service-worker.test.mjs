@@ -12,6 +12,7 @@ console.log = () => {};
 // ── chrome.* mock (async jitter exposes races between storage reads and writes) ──
 const storage = {};
 const tabMessages = [];
+let lastTabMessage = null;
 let messageListener;
 let identityHandler = null;
 const jitter = () => new Promise(resolve => realSetTimeout(resolve, Math.random() * 2));
@@ -39,7 +40,8 @@ globalThis.chrome = {
   tabs: {
     sendMessage: async (tabId, msg) => {
       tabMessages.push(msg.type);
-      return msg.type === 'PAUSE_AND_MUTE_YOUTUBE' ? { paused: true } : { restored: true };
+      lastTabMessage = msg;
+      return msg.type === 'PAUSE_AND_MUTE_YOUTUBE' ? { paused: !msg.muteOnly } : { restored: true };
     }
   },
   identity: {
@@ -170,6 +172,7 @@ test('auto mode ON: new track pauses YouTube and plays on Tudo, confirmed by GET
   assert.equal(res.handoff.device, 'Tudo');
   assert.deepEqual(S.plays, ['spotify:track:rick']);
   assert.deepEqual(tabMessages, ['PAUSE_AND_MUTE_YOUTUBE']);
+  assert.equal(lastTabMessage?.muteOnly, false);
   assert.equal(storage.handoffState, 'PLAYING');
   assert.equal(storage.lastHandoffResult.status, 'confirmed');
 });
@@ -178,6 +181,17 @@ test('same track on the same page is not sent again', async () => {
   const res = await detect('Never Gonna Give You Up', 'Rick Astley');
   assert.equal(res.decision, 'SKIP_ALREADY_SYNCED');
   assert.deepEqual(S.plays, []);
+});
+
+test('auto mode ON with keepVideoPlaying: sends muteOnly = true so video keeps playing muted', async () => {
+  storage.autoModeEnabled = true;
+  storage.keepVideoPlaying = true;
+  const res = await detect('Take On Me', 'a-ha', 'page-keep-video');
+  assert.equal(res.decision, 'TRIGGER');
+  assert.equal(res.handoff.success, true);
+  assert.equal(lastTabMessage?.type, 'PAUSE_AND_MUTE_YOUTUBE');
+  assert.equal(lastTabMessage?.muteOnly, true);
+  storage.keepVideoPlaying = false;
 });
 
 test('F5 (new pageInstanceId) sends the same track again', async () => {

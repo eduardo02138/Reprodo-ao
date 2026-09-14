@@ -82,9 +82,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     'targetDeviceName',
     'lastVolume',
     'autoModeEnabled',
+    'keepVideoPlaying',
     'debugModeEnabled',
     'lastHandoffResult'
   ]);
+
 
   if (storage.currentTrack) {
     updateTrackDisplay(storage.currentTrack);
@@ -102,6 +104,19 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ───── 2. Auto Mode Toggle ─────
+  const keepVideoPlayingToggle = document.getElementById('keep-video-playing-toggle');
+  if (keepVideoPlayingToggle) {
+    keepVideoPlayingToggle.checked = !!storage.keepVideoPlaying;
+    keepVideoPlayingToggle.addEventListener('change', async (e) => {
+      const keep = e.target.checked;
+      await chrome.storage.local.set({ keepVideoPlaying: keep });
+      showStatus(
+        keep ? 'Vídeo continuará passando (mudo)' : 'Vídeo será pausado no YouTube',
+        '#1db954'
+      );
+    });
+  }
+
   if (autoModeToggle) {
     autoModeToggle.checked = !!storage.autoModeEnabled;
     updateAutoBadge(!!storage.autoModeEnabled);
@@ -117,6 +132,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       );
     });
   }
+
 
   function updateAutoBadge(enabled) {
     if (!autoModeBadge) return;

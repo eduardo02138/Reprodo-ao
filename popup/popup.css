@@ -521,6 +521,32 @@ body {
   margin-top: 2px;
 }
 
+.video-playback-mode-row {
+  margin-top: 6px;
+}
+
+.checkbox-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  color: #aaa;
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox-label:hover {
+  color: #fff;
+}
+
+.checkbox-label input[type="checkbox"] {
+  accent-color: #1db954;
+  cursor: pointer;
+  width: 12px;
+  height: 12px;
+}
+
+
 /* Switch estilizado */
 .switch {
   position: relative;

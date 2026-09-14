@@ -466,10 +466,14 @@ async function executeHandoff({ track, tabId, origin, correlationId }) {
     // ── Step 5: Spotify is ready — NOW pause YouTube ──
     await setHandoffState(HandoffState.READY_TO_TRANSFER, correlationId);
 
-    await logTelemetry('YOUTUBE_PAUSE_REQUEST', { tabId }, correlationId);
-    const pauseResult = await sendToTab(tabId, { type: 'PAUSE_AND_MUTE_YOUTUBE' });
+    const { keepVideoPlaying } = await chrome.storage.local.get('keepVideoPlaying');
+    await logTelemetry('YOUTUBE_PAUSE_REQUEST', { tabId, keepVideoPlaying: !!keepVideoPlaying }, correlationId);
+    const pauseResult = await sendToTab(tabId, {
+      type: 'PAUSE_AND_MUTE_YOUTUBE',
+      muteOnly: !!keepVideoPlaying
+    });
     pausedTab = !!pauseResult?.paused;
-    await logTelemetry('YOUTUBE_PAUSE_RESULT', { tabId, paused: pausedTab }, correlationId);
+    await logTelemetry('YOUTUBE_PAUSE_RESULT', { tabId, paused: pausedTab, muteOnly: !!keepVideoPlaying }, correlationId);
 
     // ── Step 6: Send play command ──
     await setHandoffState(HandoffState.PLAY_COMMAND_SENT, correlationId);

@@ -76,10 +76,10 @@
   }
 
   // ───── Video Controls ─────
-  function pauseForHandoff() {
+  function pauseForHandoff({ muteOnly = false } = {}) {
     const video = getMediaElement();
     if (!video) return false;
-    if (!video.paused) {
+    if (!muteOnly && !video.paused) {
       video.pause();
       pausedByExtension = true;
     }
@@ -98,6 +98,7 @@
     mutedByExtension = false;
     pausedByExtension = false;
   }
+
 
   function unmuteIfMutedByExtension() {
     const video = getMediaElement();
@@ -415,7 +416,7 @@
   // ───── Remote Command Handler ─────
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'PAUSE_AND_MUTE_YOUTUBE' || msg.type === 'PAUSE_YOUTUBE') {
-      sendResponse({ paused: pauseForHandoff() });
+      sendResponse({ paused: pauseForHandoff({ muteOnly: !!msg.muteOnly }) });
     } else if (msg.type === 'RESTORE_YOUTUBE') {
       restoreYouTube();
       sendResponse({ restored: true });
