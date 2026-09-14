@@ -676,3 +676,38 @@ input:checked + .slider:before {
 .last-handoff.confirmed { color: #1db954; }
 .last-handoff.unconfirmed { color: #f39c12; }
 .last-handoff.failed { color: #ff5555; }
+
+/* Spotify account card (top of the popup) */
+.account-card {
+  background: #181818;
+  border: 1px solid #262626;
+  border-radius: 8px;
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.account-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+}
+.btn-account {
+  background: #1db954;
+  color: #000;
+  border: none;
+  border-radius: 14px;
+  padding: 5px 12px;
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn-account:hover { background: #1ed760; }
+.btn-account:disabled { opacity: 0.6; cursor: default; }
+.btn-account.secondary { background: transparent; color: #888; border: 1px solid #333; font-weight: 600; }
+.btn-account.secondary:hover { color: #fff; }
+.account-card .auth-setup { background: transparent; border: none; padding: 0; }
+.auth-step { margin: 0; }

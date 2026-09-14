@@ -2,8 +2,10 @@
 // one retry on 401, rate limit handling, abort controllers and error categorization.
 // Error messages start with a code (AUTH_REQUIRED, RATE_LIMITED, QUOTA_EXCEEDED, TEMPORARY_FAILURE).
 import { SPOTIFY_CLIENT_ID, TOKEN_KEYS } from './spotify-config.js';
+import { loginWithSpotify } from './auth.js';
 
 const REFRESH_MARGIN_MS = 60000;
+const SILENT_LOGIN_COOLDOWN_MS = 2 * 60 * 1000;
 
 const isExpiring = (tokens) =>
   !tokens.spotify_token_expires_at || Date.now() > tokens.spotify_token_expires_at - REFRESH_MARGIN_MS;
@@ -26,6 +28,24 @@ async function markAuthRequired() {
   await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
 }
 
+// Automatic login: after the user authorized the app once, a lost session is recovered without
+// a window. Call it while holding the refresh lock so two contexts never run the flow together.
+export async function trySilentLogin() {
+  const { spotifyAuthorizedOnce, lastSilentLoginAt = 0 } =
+    await chrome.storage.local.get(['spotifyAuthorizedOnce', 'lastSilentLoginAt']);
+  if (!spotifyAuthorizedOnce || typeof chrome.identity?.launchWebAuthFlow !== 'function') return null;
+  if (Date.now() - lastSilentLoginAt < SILENT_LOGIN_COOLDOWN_MS) return null;
+
+  await chrome.storage.local.set({ lastSilentLoginAt: Date.now() });
+  try {
+    await loginWithSpotify({ interactive: false });
+    const { spotify_access_token } = await chrome.storage.local.get('spotify_access_token');
+    return spotify_access_token || null;
+  } catch (e) {
+    return null;
+  }
+}
+
 export class SpotifyClient {
   constructor() {
     this.rateLimitResetTime = 0;
@@ -39,6 +59,11 @@ export class SpotifyClient {
     const tokens = await chrome.storage.local.get(TOKEN_KEYS);
 
     if (!tokens.spotify_access_token && !tokens.spotify_refresh_token) {
+      const silentToken = await withRefreshLock(async () => {
+        const current = await chrome.storage.local.get(TOKEN_KEYS);
+        return current.spotify_access_token || trySilentLogin();
+      });
+      if (silentToken) return silentToken;
       await markAuthRequired();
       throw new Error('AUTH_REQUIRED: Conecte sua conta Spotify no popup da extensão.');
     }
@@ -63,6 +88,8 @@ export class SpotifyClient {
         if (err.message === 'invalid_grant') {
           // Refresh token revoked or older than 6 months: only a new login fixes it
           await chrome.storage.local.remove(TOKEN_KEYS);
+          const silentToken = await trySilentLogin();
+          if (silentToken) return silentToken;
           await markAuthRequired();
           throw new Error('AUTH_REQUIRED: Sessão do Spotify revogada ou expirada. Conecte novamente.');
         }

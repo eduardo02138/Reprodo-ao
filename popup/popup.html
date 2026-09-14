@@ -16,6 +16,23 @@
       <p class="subtitle">Controle em tempo real de Alexas, TV e Dispositivos</p>
     </header>
 
+    <!-- Conta Spotify: login, login automático e primeiro acesso -->
+    <section id="account-card" class="account-card">
+      <div class="account-row">
+        <span id="auth-indicator" class="auth-text">Spotify: verificando…</span>
+        <button id="auth-btn" class="btn-account">Conectar Spotify</button>
+      </div>
+      <div id="auth-setup" class="auth-setup hidden">
+        <p class="auth-step">1. No <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>, abra o app e adicione esta Redirect URI:</p>
+        <div class="redirect-row">
+          <code id="redirect-uri"></code>
+          <button id="copy-redirect-btn" class="btn-sm-text" title="Copiar Redirect URI">📋</button>
+        </div>
+        <p class="auth-step">2. Clique em <strong>Conectar Spotify</strong> e autorize. Depois disso o login é automático.</p>
+        <p id="auth-error" class="auth-error"></p>
+      </div>
+    </section>
+
     <!-- Player Ativo com Capa e Indicador de Play/Pause -->
     <section class="current-track-card" id="track-card">
       <div class="artwork-wrapper">
@@ -142,22 +159,6 @@
     <div id="status-message" class="status-box hidden"></div>
 
     <!-- Rodapé -->
-    <!-- Conta Spotify: configuração do primeiro login -->
-    <section id="auth-setup" class="auth-setup hidden">
-      <p>Primeiro acesso: cadastre esta Redirect URI no app do
-        <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>
-        e depois clique em <strong>Conectar Spotify</strong>.</p>
-      <div class="redirect-row">
-        <code id="redirect-uri"></code>
-        <button id="copy-redirect-btn" class="btn-sm-text" title="Copiar Redirect URI">📋</button>
-      </div>
-      <p id="auth-error" class="auth-error"></p>
-    </section>
-
-    <footer class="footer">
-      <span id="auth-indicator" class="auth-text">Spotify: verificando…</span>
-      <button id="auth-btn" class="btn-link">Conectar Spotify</button>
-    </footer>
   </div>
 
   <script type="module" src="popup.js"></script>

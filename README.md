@@ -17,7 +17,8 @@ Extensão para Google Chrome (Manifest V3). Detecta a música tocando no **YouTu
   - falha transitória (dispositivo fora do ar, erro 5xx, rede) é re-tentada 2 vezes, após 10 s e 30 s. Match incerto, conta desconectada e recusa do Spotify (403) não são re-tentados;
   - o YouTube só é pausado depois que a faixa e o dispositivo estão prontos. Se o Spotify recusar o play, o som volta para o YouTube.
 - **Confirmação real:** depois do play, a extensão consulta `GET /me/player`. O popup mostra o último envio como *tocando* (confirmado), *enviado, sem confirmação* ou *falhou* (com o motivo).
-- **Conta Spotify:** login OAuth 2.0 PKCE e desconectar, direto no popup.
+- **Conta Spotify:** card no topo do popup com **Conectar Spotify** (OAuth 2.0 PKCE), nome da conta conectada e Desconectar.
+- **Login automático:** depois da primeira autorização, se a sessão cair (token revogado, expirado ou apagado), a extensão entra de novo sozinha, sem abrir janela, enquanto o navegador estiver logado no spotify.com. A tentativa acontece no máximo a cada 2 minutos e fica desligada depois de **Desconectar**.
 - **Controles:** play/pause, anterior/próxima, volume (com debounce e cancelamento de chamadas antigas) e escolha do dispositivo. Se o dispositivo escolhido sumir, a extensão usa o grupo **Tudo** sem apagar a sua escolha.
 - **Telemetria:** eventos com `correlationId`, painel de debug, copiar e exportar logs.
 
@@ -30,9 +31,11 @@ Extensão para Google Chrome (Manifest V3). Detecta a música tocando no **YouTu
    git clone https://github.com/eduardo02138/Reprodo-ao.git
    ```
 2. Abra `chrome://extensions`, ative **Modo do desenvolvedor**, clique em **Carregar sem compactação** e escolha a pasta do repositório.
-3. Abra o popup da extensão. Em "Primeiro acesso", copie a **Redirect URI** (`https://<id-da-extensão>.chromiumapp.org/spotify`).
+3. Abra o popup. No card **Conta Spotify** (topo), copie a **Redirect URI** (`https://<id-da-extensão>.chromiumapp.org/spotify`). Cada navegador ou pasta carregada gera um ID diferente; cadastre a URI de cada um.
 4. Em <https://developer.spotify.com/dashboard>, abra o app cujo Client ID está em `shared/spotify-config.js` (ou crie o seu app e troque o ID nesse arquivo) e adicione a Redirect URI.
-5. No popup, clique em **Conectar Spotify** e autorize.
+5. No card, clique em **Conectar Spotify** e autorize. Das próximas vezes o login é automático.
+
+Se o popup disser que o login está indisponível (sem `chrome.identity`), o navegador não concedeu a permissão `identity`. Remova a extensão e carregue a pasta de novo.
 
 Requisitos:
 - Conta **Spotify Premium** (a Web API só controla reprodução em contas Premium).

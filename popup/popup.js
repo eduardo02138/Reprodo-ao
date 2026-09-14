@@ -166,15 +166,40 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function renderAuthState() {
-    const data = await chrome.storage.local.get([...TOKEN_KEYS, 'engineState', 'authError']);
+    const data = await chrome.storage.local.get([...TOKEN_KEYS, 'engineState', 'authError', 'spotifyDisplayName']);
     isConnected = !!(data.spotify_access_token || data.spotify_refresh_token) && data.engineState !== 'AUTH_REQUIRED';
 
-    authIndicator.textContent = isConnected ? 'Spotify: Conectado ✓' : 'Spotify: desconectado';
+    authIndicator.textContent = isConnected
+      ? `Conectado como ${data.spotifyDisplayName || 'sua conta'} ✓`
+      : 'Spotify: desconectado';
     authIndicator.className = `auth-text ${isConnected ? 'connected' : 'disconnected'}`;
     authBtn.textContent = isConnected ? 'Desconectar' : 'Conectar Spotify';
+    authBtn.className = isConnected ? 'btn-account secondary' : 'btn-account';
     authSetup?.classList.toggle('hidden', isConnected);
     if (authErrorEl) authErrorEl.textContent = !isConnected && data.authError ? data.authError : '';
+
+    if (isConnected && !data.spotifyDisplayName) cacheProfileName();
     return isConnected;
+  }
+
+  async function cacheProfileName() {
+    const profile = await provider.getProfile().catch(() => null);
+    if (profile?.display_name) {
+      await chrome.storage.local.set({ spotifyDisplayName: profile.display_name });
+    }
+  }
+
+  // Automatic login: if the app was authorized before, recover a lost session without a window
+  async function tryAutomaticLogin() {
+    const { spotifyAuthorizedOnce } = await chrome.storage.local.get('spotifyAuthorizedOnce');
+    if (isConnected || !identityAvailable || !spotifyAuthorizedOnce) return false;
+
+    authIndicator.textContent = 'Spotify: entrando automaticamente…';
+    authBtn.disabled = true;
+    const res = await chrome.runtime.sendMessage({ type: 'SPOTIFY_LOGIN', interactive: false }).catch(() => null);
+    authBtn.disabled = false;
+    await renderAuthState();
+    return !!res?.success;
   }
 
   authBtn.addEventListener('click', () => {
@@ -218,7 +243,7 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.spotify_access_token || changes.engineState || changes.authError) renderAuthState();
+    if (changes.spotify_access_token || changes.engineState || changes.authError || changes.spotifyDisplayName) renderAuthState();
     if (changes.lastHandoffResult) renderLastHandoff(changes.lastHandoffResult.newValue);
   });
 
@@ -603,6 +628,11 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   // ───── 15. Initialize ─────
   await renderAuthState();
+  tryAutomaticLogin().then(async (loggedIn) => {
+    if (!loggedIn) return;
+    await loadDevices();
+    await checkPlaybackStatus();
+  });
   renderLastHandoff(storage.lastHandoffResult);
   updateTelemetryUI();
   setInterval(() => {

@@ -89,6 +89,13 @@ export class SpotifyProvider {
     return [];
   }
 
+  // Profile of the connected account (display_name is available without extra scopes)
+  async getProfile() {
+    const { res } = await this.client.request('/me');
+    if (!res.ok) return null;
+    return res.json();
+  }
+
   // RC-6 FIX: Returns {ok, status, error} instead of boolean
   async playTrackOnDevice(deviceId, trackUri) {
     const endpoint = deviceId
