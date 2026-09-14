@@ -94,7 +94,8 @@ async function exchangeCodeForToken(code, redirectUri, codeVerifier) {
     spotify_token_expires_at: Date.now() + data.expires_in * 1000,
     engineState: 'READY',
     // Enables the automatic (silent) login when this session is lost later
-    spotifyAuthorizedOnce: true
+    spotifyAuthorizedOnce: true,
+    autoReauthDisabled: false
   });
 
   // Tokens stay in storage only; never return them to callers that might log them
@@ -104,5 +105,10 @@ async function exchangeCodeForToken(code, redirectUri, codeVerifier) {
 export async function logoutSpotify() {
   await chrome.storage.local.remove([...TOKEN_KEYS, 'spotifyDisplayName']);
   // An explicit logout must not be undone by the automatic login
-  await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED', spotifyAuthorizedOnce: false });
+  await chrome.storage.local.set({
+    engineState: 'AUTH_REQUIRED',
+    spotifyAuthorizedOnce: false,
+    autoReauthDisabled: true
+  });
 }
+
