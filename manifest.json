@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Sync Music - Multi-Device Handoff",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Handoff inteligente de músicas do YouTube / YouTube Music diretamente para seus grupos Alexa (Tudo, Casa) e Fire TV.",
   "icons": {
     "16": "icons/icon-16.png",
@@ -40,8 +40,7 @@
   "permissions": [
     "storage",
     "identity",
-    "tabs",
-    "scripting"
+    "tabs"
   ],
   "host_permissions": [
     "https://accounts.spotify.com/*",

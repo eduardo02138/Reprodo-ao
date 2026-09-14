@@ -1,5 +1,13 @@
 // popup.js — Popup controller with all logic inside DOMContentLoaded
 import { SpotifyProvider } from '../providers/spotify-provider.js';
+import { TOKEN_KEYS } from '../shared/spotify-config.js';
+
+// Track titles come from YouTube uploaders: never inject them as HTML
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
+  '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+}[c]));
+
+const isAuthError = (message = '') => message.startsWith('AUTH_REQUIRED');
 
 document.addEventListener('DOMContentLoaded', async () => {
   // ───── Element References ─────
@@ -34,6 +42,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   // Auto mode elements
   const autoModeToggle = document.getElementById('auto-mode-toggle');
   const autoModeBadge = document.getElementById('auto-mode-badge');
+  const lastHandoffEl = document.getElementById('last-handoff');
 
   // Debug mode elements
   const debugToggle = document.getElementById('debug-mode-toggle');
@@ -45,14 +54,22 @@ document.addEventListener('DOMContentLoaded', async () => {
   const copyLogsBtn = document.getElementById('copy-logs-btn');
   const exportLogsBtn = document.getElementById('export-logs-btn');
 
+  // Spotify account elements
+  const authIndicator = document.getElementById('auth-indicator');
+  const authBtn = document.getElementById('auth-btn');
+  const authSetup = document.getElementById('auth-setup');
+  const authErrorEl = document.getElementById('auth-error');
+  const redirectUriEl = document.getElementById('redirect-uri');
+  const copyRedirectBtn = document.getElementById('copy-redirect-btn');
+
   const provider = new SpotifyProvider();
   let currentTrack = null;
+  let activeTab = null;
   let selectedDeviceId = null;
   let selectedDeviceName = 'Tudo';
   let isCurrentlyPlaying = false;
   let volumeDebounceTimer = null;
-  let pollTimer = null;
-  let telemetryTimer = null;
+  let isConnected = false;
 
   // ───── 1. Load saved state ─────
   const storage = await chrome.storage.local.get([
@@ -61,7 +78,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     'targetDeviceName',
     'lastVolume',
     'autoModeEnabled',
-    'debugModeEnabled'
+    'debugModeEnabled',
+    'lastHandoffResult'
   ]);
 
   if (storage.currentTrack) {
@@ -79,14 +97,15 @@ document.addEventListener('DOMContentLoaded', async () => {
     volValText.textContent = `${storage.lastVolume}%`;
   }
 
-  // ───── 2. Auto Mode Toggle (INSIDE DOMContentLoaded — RC-4 FIX) ─────
+  // ───── 2. Auto Mode Toggle ─────
   if (autoModeToggle) {
     autoModeToggle.checked = !!storage.autoModeEnabled;
     updateAutoBadge(!!storage.autoModeEnabled);
 
     autoModeToggle.addEventListener('change', async (e) => {
       const enabled = e.target.checked;
-      await chrome.storage.local.set({ autoModeEnabled: enabled });
+      // Clearing lastAutoSync lets the track already playing on YouTube go to Spotify right away
+      await chrome.storage.local.set({ autoModeEnabled: enabled, lastAutoSync: null });
       updateAutoBadge(enabled);
       showStatus(
         enabled ? '⚡ Modo Automático ATIVADO' : 'Modo Automático DESATIVADO',
@@ -97,13 +116,25 @@ document.addEventListener('DOMContentLoaded', async () => {
 
   function updateAutoBadge(enabled) {
     if (!autoModeBadge) return;
-    if (enabled) {
-      autoModeBadge.textContent = 'ON';
-      autoModeBadge.className = 'badge-auto-on';
-    } else {
-      autoModeBadge.textContent = 'OFF';
-      autoModeBadge.className = 'badge-auto-off';
+    autoModeBadge.textContent = enabled ? 'ON' : 'OFF';
+    autoModeBadge.className = enabled ? 'badge-auto-on' : 'badge-auto-off';
+  }
+
+  function renderLastHandoff(result) {
+    if (!lastHandoffEl) return;
+    if (!result) {
+      lastHandoffEl.classList.add('hidden');
+      return;
     }
+    const when = new Date(result.at).toLocaleTimeString('pt-BR', { hour: '2-digit', minute: '2-digit' });
+    const text = {
+      confirmed: `✓ ${when} tocando: ${result.trackName} → ${result.device}`,
+      unconfirmed: `… ${when} enviado, sem confirmação: ${result.trackName} → ${result.device}`,
+      failed: `✗ ${when} falhou: ${result.message}`
+    }[result.status] || '';
+    lastHandoffEl.textContent = text;
+    lastHandoffEl.title = text;
+    lastHandoffEl.className = `last-handoff ${result.status}`;
   }
 
   // ───── 3. Debug Mode Toggle ─────
@@ -124,10 +155,67 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // ───── 4. Query active tab ─────
+  // ───── 4. Spotify Account ─────
+  if (redirectUriEl) {
+    redirectUriEl.textContent = chrome.identity.getRedirectURL('spotify');
+  }
+
+  async function renderAuthState() {
+    const data = await chrome.storage.local.get([...TOKEN_KEYS, 'engineState', 'authError']);
+    isConnected = !!(data.spotify_access_token || data.spotify_refresh_token) && data.engineState !== 'AUTH_REQUIRED';
+
+    authIndicator.textContent = isConnected ? 'Spotify: Conectado ✓' : 'Spotify: desconectado';
+    authIndicator.className = `auth-text ${isConnected ? 'connected' : 'disconnected'}`;
+    authBtn.textContent = isConnected ? 'Desconectar' : 'Conectar Spotify';
+    authSetup?.classList.toggle('hidden', isConnected);
+    if (authErrorEl) authErrorEl.textContent = !isConnected && data.authError ? data.authError : '';
+    return isConnected;
+  }
+
+  authBtn.addEventListener('click', () => {
+    if (isConnected) {
+      chrome.runtime.sendMessage({ type: 'SPOTIFY_LOGOUT' }, async () => {
+        await renderAuthState();
+        await loadDevices();
+        showStatus('Spotify desconectado', '#888');
+      });
+      return;
+    }
+
+    authBtn.disabled = true;
+    authBtn.textContent = 'Abrindo login…';
+    // The popup usually closes when the Spotify window opens; the service worker finishes the flow
+    chrome.runtime.sendMessage({ type: 'SPOTIFY_LOGIN' }, async (res) => {
+      if (chrome.runtime.lastError) return;
+      authBtn.disabled = false;
+      await renderAuthState();
+      if (res?.success) {
+        showStatus('✓ Spotify conectado', '#1db954');
+        await loadDevices();
+        await checkPlaybackStatus();
+      } else {
+        showStatus(`Login falhou: ${res?.message || 'erro desconhecido'}`, '#ff5555');
+      }
+    });
+  });
+
+  if (copyRedirectBtn) {
+    copyRedirectBtn.addEventListener('click', async () => {
+      await navigator.clipboard.writeText(redirectUriEl.textContent);
+      showStatus('📋 Redirect URI copiada', '#1db954');
+    });
+  }
+
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local') return;
+    if (changes.spotify_access_token || changes.engineState || changes.authError) renderAuthState();
+    if (changes.lastHandoffResult) renderLastHandoff(changes.lastHandoffResult.newValue);
+  });
+
+  // ───── 5. Query active tab ─────
   try {
-    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (activeTab && (activeTab.url?.includes('youtube.com') || activeTab.url?.includes('music.youtube.com'))) {
+    [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab && /^https:\/\/(www|music)\.youtube\.com\//.test(activeTab.url || '')) {
       chrome.tabs.sendMessage(activeTab.id, { type: 'GET_ACTIVE_TRACK' }, (res) => {
         if (chrome.runtime.lastError) return; // tab may not have content script
         if (res?.payload) {
@@ -193,8 +281,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }, 4500);
   }
 
-  // ───── 5. Playback polling ─────
+  function errorText(err) {
+    return isAuthError(err.message) ? 'Conecte o Spotify (rodapé do popup)' : err.message;
+  }
+
+  // ───── 6. Playback polling ─────
   async function checkPlaybackStatus() {
+    if (!isConnected) return;
     try {
       const state = await provider.getPlaybackState();
       if (state) {
@@ -220,36 +313,49 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (e) { /* silent on network failures */ }
   }
 
-  // ───── 6. Debug panel updates ─────
+  // ───── 7. Debug panel updates ─────
   async function updateDebugPanel() {
     if (!debugPanel || debugPanel.classList.contains('hidden')) return;
 
     const data = await chrome.storage.local.get([
       'autoModeEnabled', 'currentTrack', 'lastAutoSync',
       'targetDeviceId', 'targetDeviceName', 'handoffState',
-      'lastCorrelationId', 'lastHandoffError'
+      'lastCorrelationId', 'lastHandoffError', 'engineState'
     ]);
 
     const debugContent = debugPanel.querySelector('.debug-content');
     if (!debugContent) return;
 
+    const row = (label, value, cls = '') =>
+      `<div class="debug-row ${cls}"><span>${label}</span> <span>${escapeHtml(value)}</span></div>`;
     const track = data.currentTrack;
-    const lastSync = data.lastAutoSync;
 
-    debugContent.innerHTML = `
-      <div class="debug-row"><span>AUTO:</span> <span class="${data.autoModeEnabled ? 'debug-on' : 'debug-off'}">${data.autoModeEnabled ? 'ON' : 'OFF'}</span></div>
-      <div class="debug-row"><span>Track:</span> <span>${track?.title || '—'}</span></div>
-      <div class="debug-row"><span>Artist:</span> <span>${track?.artist || '—'}</span></div>
-      <div class="debug-row"><span>Signature:</span> <span>${track?.signature || '—'}</span></div>
-      <div class="debug-row"><span>Previous:</span> <span>${lastSync?.signature || '—'}</span></div>
-      <div class="debug-row"><span>Target:</span> <span>${data.targetDeviceName || 'Tudo'}</span></div>
-      <div class="debug-row"><span>State:</span> <span>${data.handoffState || 'IDLE'}</span></div>
-      <div class="debug-row"><span>Correlation:</span> <span>${data.lastCorrelationId || '—'}</span></div>
-      ${data.lastHandoffError ? `<div class="debug-row debug-error"><span>Error:</span> <span>${data.lastHandoffError}</span></div>` : ''}
-    `;
+    debugContent.innerHTML = [
+      `<div class="debug-row"><span>AUTO:</span> <span class="${data.autoModeEnabled ? 'debug-on' : 'debug-off'}">${data.autoModeEnabled ? 'ON' : 'OFF'}</span></div>`,
+      row('Track:', track?.title || '—'),
+      row('Artist:', track?.artist || '—'),
+      row('Signature:', track?.signature || '—'),
+      row('Previous:', data.lastAutoSync?.signature || '—'),
+      row('Target:', data.targetDeviceName || 'Tudo'),
+      row('State:', data.handoffState || 'IDLE'),
+      row('Engine:', data.engineState || '—'),
+      row('Correlation:', data.lastCorrelationId || '—'),
+      data.lastHandoffError ? row('Error:', data.lastHandoffError, 'debug-error') : ''
+    ].join('');
   }
 
-  // ───── 7. Telemetry UI ─────
+  // ───── 8. Telemetry UI ─────
+  function describeLog(data = {}) {
+    const main = data.title || data.trackName || data.device || '';
+    const extras = [
+      data.decision,
+      data.confidence !== undefined ? `${data.confidence}%` : null,
+      data.status !== undefined ? `HTTP ${data.status}` : null,
+      data.error
+    ].filter(Boolean);
+    return [main, ...extras].filter(Boolean).join(' · ');
+  }
+
   async function updateTelemetryUI() {
     if (!telemetryListEl) return;
     const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
@@ -259,18 +365,18 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
 
     telemetryListEl.innerHTML = telemetryLogs.slice(0, 15).map(l => {
-      const detail = l.data?.title || l.data?.trackName || l.data?.error || l.data?.decision || '';
-      const cid = l.correlationId ? `<span class="log-cid">${l.correlationId}</span>` : '';
+      const detail = escapeHtml(describeLog(l.data));
+      const cid = l.correlationId ? `<span class="log-cid">${escapeHtml(l.correlationId)}</span>` : '';
       return `
         <div class="telemetry-item">
-          <div><span class="log-time">${l.time}</span>${cid}<span class="log-stage">${l.stage}</span></div>
-          <span class="log-msg">${detail}</span>
+          <div><span class="log-time">${escapeHtml(l.time)}</span>${cid}<span class="log-stage">${escapeHtml(l.stage)}</span></div>
+          <span class="log-msg" title="${detail}">${detail}</span>
         </div>
       `;
     }).join('');
   }
 
-  // ───── 8. Playback Controls ─────
+  // ───── 9. Playback Controls ─────
   ctrlPlayPauseBtn.addEventListener('click', async () => {
     iconPlay.classList.add('hidden');
     iconPause.classList.add('hidden');
@@ -282,7 +388,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       setPlayingVisuals(newState);
       showStatus(newState ? '▶ Reproduzindo' : '⏸ Pausado', newState ? '#1db954' : '#f39c12');
     } catch (err) {
-      showStatus(`Erro: ${err.message}`, '#ff5555');
+      showStatus(`Erro: ${errorText(err)}`, '#ff5555');
     } finally {
       btnSpinner.classList.add('hidden');
       if (isCurrentlyPlaying) iconPause.classList.remove('hidden');
@@ -295,7 +401,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       await provider.nextTrack();
       showStatus('⏭ Próxima faixa', '#1db954');
       setTimeout(checkPlaybackStatus, 800);
-    } catch (e) {}
+    } catch (err) {
+      showStatus(`Erro: ${errorText(err)}`, '#ff5555');
+    }
   });
 
   ctrlPrevBtn.addEventListener('click', async () => {
@@ -303,10 +411,12 @@ document.addEventListener('DOMContentLoaded', async () => {
       await provider.previousTrack();
       showStatus('⏮ Faixa anterior', '#1db954');
       setTimeout(checkPlaybackStatus, 800);
-    } catch (e) {}
+    } catch (err) {
+      showStatus(`Erro: ${errorText(err)}`, '#ff5555');
+    }
   });
 
-  // ───── 9. Volume ─────
+  // ───── 10. Volume ─────
   volumeSlider.addEventListener('input', (e) => {
     const val = parseInt(e.target.value, 10);
     volValText.textContent = `${val}%`;
@@ -326,8 +436,13 @@ document.addEventListener('DOMContentLoaded', async () => {
     }, 200);
   });
 
-  // ───── 10. Device list ─────
+  // ───── 11. Device list ─────
   async function loadDevices() {
+    if (!isConnected) {
+      deviceListEl.innerHTML = '<div class="empty-state">Conecte sua conta Spotify (rodapé) para listar os dispositivos.</div>';
+      return;
+    }
+
     deviceListEl.innerHTML = '<div class="loading-state">Buscando dispositivos...</div>';
 
     try {
@@ -371,8 +486,8 @@ document.addEventListener('DOMContentLoaded', async () => {
         item.innerHTML = `
           <div class="device-icon">${icon}</div>
           <div class="device-info">
-            <span class="device-name">${dev.name}</span>
-            <span class="device-status">${dev.type} • ${dev.is_active ? 'Em reprodução' : 'Disponível'}</span>
+            <span class="device-name">${escapeHtml(dev.name)}</span>
+            <span class="device-status">${escapeHtml(dev.type)} • ${dev.is_active ? 'Em reprodução' : 'Disponível'}</span>
           </div>
           <span class="radio-indicator"></span>
         `;
@@ -402,11 +517,11 @@ document.addEventListener('DOMContentLoaded', async () => {
       updateHandoffButtonState();
 
     } catch (err) {
-      deviceListEl.innerHTML = `<div class="empty-state" style="color:#ff5555">Erro: ${err.message}</div>`;
+      deviceListEl.innerHTML = `<div class="empty-state" style="color:#ff5555">Erro: ${escapeHtml(errorText(err))}</div>`;
     }
   }
 
-  // ───── 11. Manual Handoff ─────
+  // ───── 12. Manual Handoff ─────
   handoffBtn.addEventListener('click', () => {
     if (!currentTrack) return;
 
@@ -414,9 +529,11 @@ document.addEventListener('DOMContentLoaded', async () => {
     handoffBtnText.textContent = `Enviando para ${selectedDeviceName}...`;
     handoffSpinner.classList.remove('hidden');
 
+    const isYouTubeTab = /^https:\/\/(www|music)\.youtube\.com\//.test(activeTab?.url || '');
     chrome.runtime.sendMessage({
       type: 'TRIGGER_HANDOFF',
-      autoPause: true
+      payload: currentTrack,
+      tabId: isYouTubeTab ? activeTab.id : undefined
     }, (res) => {
       if (chrome.runtime.lastError) {
         showStatus('Erro: Extensão desconectada', '#ff5555');
@@ -426,7 +543,10 @@ document.addEventListener('DOMContentLoaded', async () => {
       handoffBtnText.textContent = `▶ Pausar YouTube & Tocar em ${selectedDeviceName}`;
 
       if (res && res.success) {
-        showStatus(`✓ Tocando "${res.trackName}" em ${selectedDeviceName}!`, '#1db954');
+        showStatus(
+          res.confirmed ? `✓ Tocando "${res.trackName}" em ${res.device}!` : `Enviado "${res.trackName}" para ${res.device} (aguardando confirmação)`,
+          res.confirmed ? '#1db954' : '#f39c12'
+        );
         setPlayingVisuals(true);
         setTimeout(checkPlaybackStatus, 1200);
       } else {
@@ -435,7 +555,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  // ───── 12. Log buttons ─────
+  // ───── 13. Log buttons ─────
   if (clearLogsBtn) {
     clearLogsBtn.addEventListener('click', async () => {
       await chrome.storage.local.set({ telemetryLogs: [] });
@@ -467,17 +587,20 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // ───── 13. Event listeners ─────
+  // ───── 14. Event listeners ─────
   refreshDevicesBtn.addEventListener('click', loadDevices);
   if (closeBtn) closeBtn.addEventListener('click', () => window.close());
 
-  // ───── 14. Initialize ─────
-  await loadDevices();
-  await checkPlaybackStatus();
-  pollTimer = setInterval(checkPlaybackStatus, 3000);
+  // ───── 15. Initialize ─────
+  await renderAuthState();
+  renderLastHandoff(storage.lastHandoffResult);
   updateTelemetryUI();
-  telemetryTimer = setInterval(() => {
+  setInterval(() => {
     updateTelemetryUI();
     updateDebugPanel();
   }, 2000);
+
+  await loadDevices();
+  await checkPlaybackStatus();
+  setInterval(checkPlaybackStatus, 3000);
 });

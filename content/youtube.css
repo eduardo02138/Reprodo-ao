@@ -1,28 +1,36 @@
-/* Estilização do botão discreto dentro do player do YouTube */
-.sync-music-quick-action {
+/* Handoff button injected into the YouTube / YouTube Music player controls */
+.sync-handoff-btn {
   background: transparent;
   border: none;
   color: #fff;
   cursor: pointer;
+  width: 48px;
+  height: 100%;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 8px;
-  margin-right: 8px;
-  vertical-align: middle;
-  border-radius: 50%;
-  transition: all 0.2s ease-in-out;
-  outline: none;
+  vertical-align: top;
+  opacity: 0.9;
+  transition: color 0.2s ease, opacity 0.2s ease;
 }
 
-.sync-music-quick-action:hover {
-  background: rgba(255, 255, 255, 0.2);
+.sync-handoff-btn:hover {
   color: #1DB954;
-  transform: scale(1.1);
+  opacity: 1;
 }
 
-.sync-music-quick-action.sync-active {
-  background: #1DB954;
-  color: #000;
-  box-shadow: 0 0 10px #1DB954;
+.sync-handoff-btn.loading svg {
+  animation: sync-music-pulse 0.8s ease-in-out infinite;
+}
+
+.sync-handoff-btn.success {
+  color: #1DB954;
+}
+
+.sync-handoff-btn.error {
+  color: #ff5555;
+}
+
+@keyframes sync-music-pulse {
+  50% { opacity: 0.35; }
 }

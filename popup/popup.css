@@ -634,3 +634,45 @@ input:checked + .slider:before {
 .debug-off { color: #888 !important; }
 .debug-error { border-left: 2px solid #ff5555; }
 .debug-error span:last-child { color: #ff5555; }
+
+/* Spotify account */
+.auth-text.connected { color: #1db954; }
+.auth-text.disconnected { color: #f39c12; }
+.auth-setup {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 6px;
+  padding: 8px;
+  font-size: 10px;
+  color: #aaa;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.auth-setup a { color: #1db954; }
+.redirect-row { display: flex; align-items: center; gap: 4px; }
+.redirect-row code {
+  flex: 1;
+  font-size: 9px;
+  color: #ddd;
+  background: #111;
+  padding: 4px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+.auth-error { color: #ff5555; }
+.auth-error:empty { display: none; }
+
+/* Result of the last handoff (auto mode card) */
+.last-handoff {
+  font-size: 10px;
+  margin-top: 4px;
+  color: #888;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 250px;
+}
+.last-handoff.confirmed { color: #1db954; }
+.last-handoff.unconfirmed { color: #f39c12; }
+.last-handoff.failed { color: #ff5555; }

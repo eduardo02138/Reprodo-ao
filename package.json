@@ -1,0 +1,13 @@
+{
+  "name": "sync-music-extension",
+  "version": "1.4.0",
+  "private": true,
+  "description": "Chrome extension: hand off YouTube / YouTube Music tracks to Spotify Connect devices (Alexa groups, TVs)",
+  "scripts": {
+    "test": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test \"tests/unit/*.test.mjs\"",
+    "test:e2e": "node tests/e2e/auto-mode.e2e.cjs"
+  },
+  "devDependencies": {
+    "playwright-chromium": "^1.63.0"
+  }
+}

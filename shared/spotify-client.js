@@ -1,7 +1,30 @@
-// spotify-client.js: Centralized Spotify API client with auto-refresh,
-// rate limit handling, abort controllers, and proper error categorization
+// spotify-client.js: Centralized Spotify API client with serialized token refresh,
+// one retry on 401, rate limit handling, abort controllers and error categorization.
+// Error messages start with a code (AUTH_REQUIRED, RATE_LIMITED, QUOTA_EXCEEDED, TEMPORARY_FAILURE).
+import { SPOTIFY_CLIENT_ID, TOKEN_KEYS } from './spotify-config.js';
 
-const CLIENT_ID = '24cb626331b849ecafb746f6b4487f80';
+const REFRESH_MARGIN_MS = 60000;
+
+const isExpiring = (tokens) =>
+  !tokens.spotify_token_expires_at || Date.now() > tokens.spotify_token_expires_at - REFRESH_MARGIN_MS;
+
+let localRefreshChain = Promise.resolve();
+
+// Popup and service worker each have their own client. Spotify rotates refresh tokens
+// (the old one stops working), so two simultaneous refreshes would log the user out.
+// A Web Lock serializes the refresh across every extension context.
+function withRefreshLock(fn) {
+  if (globalThis.navigator?.locks) {
+    return navigator.locks.request('spotify-token-refresh', fn);
+  }
+  const run = localRefreshChain.then(fn);
+  localRefreshChain = run.catch(() => {});
+  return run;
+}
+
+async function markAuthRequired() {
+  await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
+}
 
 export class SpotifyClient {
   constructor() {
@@ -11,53 +34,51 @@ export class SpotifyClient {
     this.activeAbortControllers = new Map();
   }
 
-  async getAccessToken() {
-    let { spotify_access_token, spotify_refresh_token, spotify_token_expires_at } =
-      await chrome.storage.local.get([
-        'spotify_access_token', 'spotify_refresh_token', 'spotify_token_expires_at'
-      ]);
+  // staleToken: a token Spotify just rejected with 401 and must be replaced even if not "expired"
+  async getAccessToken({ staleToken = null } = {}) {
+    const tokens = await chrome.storage.local.get(TOKEN_KEYS);
 
-    // No token at all → user must authenticate
-    if (!spotify_access_token && !spotify_refresh_token) {
-      await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
-      throw new Error('AUTH_REQUIRED: Nenhum token encontrado. Faça login no Spotify.');
+    if (!tokens.spotify_access_token && !tokens.spotify_refresh_token) {
+      await markAuthRequired();
+      throw new Error('AUTH_REQUIRED: Conecte sua conta Spotify no popup da extensão.');
     }
 
-    // Auto-refresh if token expires within 60 seconds
-    const isExpiring = !spotify_token_expires_at || Date.now() > (spotify_token_expires_at - 60000);
-    if (isExpiring && spotify_refresh_token) {
+    const needsRefresh = (t) => isExpiring(t) || (!!staleToken && t.spotify_access_token === staleToken);
+    if (!needsRefresh(tokens)) return tokens.spotify_access_token;
+
+    if (!tokens.spotify_refresh_token) {
+      await markAuthRequired();
+      throw new Error('AUTH_REQUIRED: Sessão do Spotify expirada. Conecte novamente.');
+    }
+
+    return withRefreshLock(async () => {
+      // Another context may have refreshed while we waited for the lock
+      const current = await chrome.storage.local.get(TOKEN_KEYS);
+      if (current.spotify_access_token && !needsRefresh(current)) return current.spotify_access_token;
+
       try {
-        const refreshed = await this.refreshToken(spotify_refresh_token);
-        if (refreshed) {
-          spotify_access_token = refreshed.access_token;
-        }
+        const refreshed = await this.refreshToken(current.spotify_refresh_token);
+        return refreshed.access_token;
       } catch (err) {
-        if (err.message.includes('invalid_grant')) {
-          // Refresh token revoked or expired (6 months) — need full re-auth
-          await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
-          throw new Error('AUTH_REQUIRED: Sessão do Spotify expirada. Faça login novamente.');
+        if (err.message === 'invalid_grant') {
+          // Refresh token revoked or older than 6 months: only a new login fixes it
+          await chrome.storage.local.remove(TOKEN_KEYS);
+          await markAuthRequired();
+          throw new Error('AUTH_REQUIRED: Sessão do Spotify revogada ou expirada. Conecte novamente.');
         }
-
-        // Network error or server error during refresh — temporary failure
-        // Do NOT return the expired token
-        if (!spotify_access_token || (spotify_token_expires_at && Date.now() > spotify_token_expires_at)) {
-          throw new Error(`TEMPORARY_AUTH_FAILURE: ${err.message}`);
-        }
-        // Token not yet expired, use it despite refresh failure
+        // Network/5xx during refresh: keep using the current token only while it is really valid
+        const stillValid = current.spotify_access_token
+          && current.spotify_token_expires_at > Date.now()
+          && current.spotify_access_token !== staleToken;
+        if (stillValid) return current.spotify_access_token;
+        throw new Error(`TEMPORARY_FAILURE: Falha ao renovar token (${err.message})`);
       }
-    }
-
-    if (!spotify_access_token) {
-      await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
-      throw new Error('AUTH_REQUIRED');
-    }
-
-    return spotify_access_token;
+    });
   }
 
   async refreshToken(refreshToken) {
     const params = new URLSearchParams();
-    params.append('client_id', CLIENT_ID);
+    params.append('client_id', SPOTIFY_CLIENT_ID);
     params.append('grant_type', 'refresh_token');
     params.append('refresh_token', refreshToken);
 
@@ -76,21 +97,34 @@ export class SpotifyClient {
     }
 
     const data = await res.json();
-    const expiresAt = Date.now() + (data.expires_in * 1000);
-
     await chrome.storage.local.set({
       spotify_access_token: data.access_token,
       spotify_refresh_token: data.refresh_token || refreshToken,
-      spotify_token_expires_at: expiresAt,
-      engineState: 'ACTIVE'
+      spotify_token_expires_at: Date.now() + (data.expires_in * 1000),
+      engineState: 'READY'
     });
 
     return data;
   }
 
+  async send(url, options, token) {
+    const headers = {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    };
+    try {
+      return await fetch(url, { ...options, headers });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error('REQUEST_SUPERSEDED: Operação mais recente enviada.');
+      }
+      throw new Error(`TEMPORARY_FAILURE: Rede indisponível (${err.message})`);
+    }
+  }
+
   // Centralized request method with rate limit, abort, and auth handling
   async request(endpoint, options = {}, cancelTag = null) {
-    // 1. Check quota/rate limit state
     if (this.quotaExceeded) {
       throw new Error('QUOTA_EXCEEDED: Cota de API do Spotify excedida no modo desenvolvedor.');
     }
@@ -100,7 +134,7 @@ export class SpotifyClient {
       throw new Error(`RATE_LIMITED: Aguarde ${waitSec}s antes de enviar novos comandos.`);
     }
 
-    // 2. Cancel previous request with same tag (e.g., rapid volume changes)
+    // Cancel previous request with same tag (e.g., rapid volume changes)
     if (cancelTag) {
       if (this.activeAbortControllers.has(cancelTag)) {
         this.activeAbortControllers.get(cancelTag).abort();
@@ -110,33 +144,27 @@ export class SpotifyClient {
       options.signal = controller.signal;
     }
 
-    const token = await this.getAccessToken();
-    if (!token) throw new Error('AUTH_REQUIRED');
-
-    const headers = {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(options.headers || {})
-    };
-
     const currentSeq = ++this.requestSequence;
     const url = endpoint.startsWith('http') ? endpoint : `https://api.spotify.com/v1${endpoint}`;
 
     let res;
     try {
-      res = await fetch(url, { ...options, headers });
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        throw new Error('REQUEST_SUPERSEDED: Operação mais recente enviada.');
+      const token = await this.getAccessToken();
+      res = await this.send(url, options, token);
+
+      // Token rejected before its expected expiry (revoked, rotated elsewhere): refresh once and retry
+      if (res.status === 401) {
+        const renewed = await this.getAccessToken({ staleToken: token });
+        if (renewed && renewed !== token) {
+          res = await this.send(url, options, renewed);
+        }
       }
-      throw err;
     } finally {
       if (cancelTag && this.activeAbortControllers.get(cancelTag)?.signal === options.signal) {
         this.activeAbortControllers.delete(cancelTag);
       }
     }
 
-    // 3. Handle response status codes
     if (res.status === 429) {
       const retryAfter = parseInt(res.headers.get('Retry-After') || '5', 10);
       this.rateLimitResetTime = Date.now() + (retryAfter * 1000);
@@ -144,15 +172,15 @@ export class SpotifyClient {
       if (body.includes('QUOTA_EXCEEDED')) {
         this.quotaExceeded = true;
         await chrome.storage.local.set({ engineState: 'QUOTA_EXCEEDED' });
-      } else {
-        await chrome.storage.local.set({ engineState: 'RATE_LIMITED' });
+        throw new Error('QUOTA_EXCEEDED: Cota de API do Spotify excedida no modo desenvolvedor.');
       }
+      await chrome.storage.local.set({ engineState: 'RATE_LIMITED' });
       throw new Error(`RATE_LIMITED: Retry-After ${retryAfter}s`);
     }
 
     if (res.status === 401) {
-      await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
-      throw new Error('AUTH_REQUIRED');
+      await markAuthRequired();
+      throw new Error('AUTH_REQUIRED: Spotify recusou o token. Conecte novamente.');
     }
 
     return { res, seq: currentSeq };

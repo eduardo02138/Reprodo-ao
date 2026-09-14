@@ -3,3 +3,4 @@ node_modules/
 default-token.json
 .env
 *.log
+tests/e2e/.output/

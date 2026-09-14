@@ -1,0 +1,358 @@
+// Tests the REAL background/service-worker.js with chrome.* and the Spotify Web API mocked.
+// Run: npm test
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
+
+// Handoff sleeps (transfer settle, playback verification) run with 0 ms
+const realSetTimeout = globalThis.setTimeout;
+globalThis.setTimeout = (fn, ms, ...args) => realSetTimeout(fn, 0, ...args);
+console.log = () => {};
+
+// ── chrome.* mock (async jitter exposes races between storage reads and writes) ──
+const storage = {};
+const tabMessages = [];
+let messageListener;
+let identityHandler = null;
+const jitter = () => new Promise(resolve => realSetTimeout(resolve, Math.random() * 2));
+
+globalThis.chrome = {
+  storage: {
+    local: {
+      get: async (keys) => {
+        await jitter();
+        const list = keys == null ? Object.keys(storage) : (typeof keys === 'string' ? [keys] : keys);
+        return Object.fromEntries(list.filter(k => k in storage).map(k => [k, structuredClone(storage[k])]));
+      },
+      set: async (obj) => {
+        await jitter();
+        for (const [k, v] of Object.entries(obj)) storage[k] = structuredClone(v);
+      },
+      remove: async (keys) => {
+        await jitter();
+        for (const k of [].concat(keys)) delete storage[k];
+      }
+    }
+  },
+  runtime: { onMessage: { addListener: (fn) => { messageListener = fn; } } },
+  action: { setBadgeText: async () => {}, setBadgeBackgroundColor: async () => {} },
+  tabs: {
+    sendMessage: async (tabId, msg) => {
+      tabMessages.push(msg.type);
+      return msg.type === 'PAUSE_AND_MUTE_YOUTUBE' ? { paused: true } : { restored: true };
+    }
+  },
+  identity: {
+    getRedirectURL: (path) => `https://testextid.chromiumapp.org/${path}`,
+    launchWebAuthFlow: async ({ url }) => identityHandler(url)
+  }
+};
+
+// ── Spotify Web API mock (refresh tokens rotate: the previous one stops working) ──
+const TUDO = { id: 'dev-tudo', name: 'Tudo', type: 'Speaker', is_active: false };
+const ECHO = { id: 'dev-echo', name: 'Echo Pop', type: 'Speaker', is_active: false };
+const S = {
+  devices: [TUDO],
+  catalog: [
+    ['Never Gonna Give You Up', 'Rick Astley', 'rick'],
+    ['Take On Me', 'a-ha', 'aha'],
+    ['POWER', 'Kanye West', 'power'],
+    ['Bohemian Rhapsody', 'Queen', 'queen'],
+    ['Admirável Chip Novo', 'Pitty', 'pitty'],
+    ['Die With A Smile', 'Lady Gaga', 'gaga']
+  ].map(([name, artist, id]) => ({ name, artists: [{ name: artist }], album: { name }, uri: `spotify:track:${id}` })),
+  player: null,
+  playerUpdates: true,
+  failPlay: [],
+  calls: [],
+  plays: [],
+  validAccess: 'acc-0',
+  validRefresh: 'ref-0',
+  tokenSeq: 0,
+  refreshCalls: 0,
+  codeExchanges: []
+};
+
+const json = (body, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+
+globalThis.fetch = async (url, opts = {}) => {
+  const u = new URL(url);
+  const method = opts.method || 'GET';
+  S.calls.push(`${method} ${u.hostname}${u.pathname}`);
+
+  if (u.hostname === 'accounts.spotify.com') {
+    const body = new URLSearchParams(opts.body);
+    await new Promise(resolve => realSetTimeout(resolve, 3));
+    if (body.get('grant_type') === 'authorization_code') {
+      S.codeExchanges.push(Object.fromEntries(body));
+      if (body.get('code') !== 'good-code' || !body.get('code_verifier')) return json({ error: 'invalid_grant' }, 400);
+    } else {
+      S.refreshCalls++;
+      if (body.get('refresh_token') !== S.validRefresh) return json({ error: 'invalid_grant', error_description: 'Refresh token revoked' }, 400);
+    }
+    S.tokenSeq++;
+    S.validAccess = `acc-${S.tokenSeq}`;
+    S.validRefresh = `ref-${S.tokenSeq}`;
+    return json({ access_token: S.validAccess, refresh_token: S.validRefresh, expires_in: 3600, scope: 'user-modify-playback-state' });
+  }
+
+  if (opts.headers?.Authorization !== `Bearer ${S.validAccess}`) {
+    return json({ error: { status: 401, message: 'The access token expired' } }, 401);
+  }
+  if (u.pathname === '/v1/me/player/devices') return json({ devices: S.devices });
+  if (u.pathname === '/v1/search') {
+    const q = u.searchParams.get('q').toLowerCase();
+    return json({ tracks: { items: S.catalog.filter(t => q.includes(t.name.toLowerCase())) } });
+  }
+  if (u.pathname === '/v1/me/player/play' && method === 'PUT') {
+    const status = S.failPlay.shift();
+    if (status) return json({ error: { status, message: `mock ${status}` } }, status);
+    const uri = JSON.parse(opts.body).uris[0];
+    S.plays.push(uri);
+    if (S.playerUpdates) {
+      const device = S.devices.find(d => d.id === u.searchParams.get('device_id'));
+      S.player = { is_playing: true, device, item: S.catalog.find(t => t.uri === uri) };
+    }
+    return new Response(null, { status: 204 });
+  }
+  if (u.pathname === '/v1/me/player' && method === 'PUT') return new Response(null, { status: 204 });
+  if (u.pathname === '/v1/me/player') return S.player ? json(S.player) : new Response(null, { status: 204 });
+  return json({ error: 'not mocked' }, 500);
+};
+
+const freshTokens = () => ({
+  spotify_access_token: S.validAccess,
+  spotify_refresh_token: S.validRefresh,
+  spotify_token_expires_at: Date.now() + 3600 * 1000
+});
+Object.assign(storage, freshTokens());
+
+await import('../../background/service-worker.js');
+const { SpotifyClient } = await import('../../shared/spotify-client.js');
+const { logTelemetry } = await import('../../shared/logger.js');
+
+const TAB = { tab: { id: 7 } };
+const send = (message, sender = TAB) => new Promise((resolve) => {
+  if (messageListener(message, sender, resolve) !== true) resolve(undefined);
+});
+const detect = (title, artist, pageInstanceId = 'page-1', extra = {}) => send({
+  type: 'NOW_PLAYING_DETECTED',
+  payload: { title, artist, pageInstanceId, videoId: 'vid', source: 'youtube', metadataSource: 'media-session', ...extra }
+});
+
+test.beforeEach(() => {
+  tabMessages.length = 0;
+  S.calls = [];
+  S.plays = [];
+  S.failPlay = [];
+  S.playerUpdates = true;
+  S.devices = [TUDO];
+});
+
+test('auto mode OFF: track is detected but nothing plays', async () => {
+  storage.autoModeEnabled = false;
+  const res = await detect('Never Gonna Give You Up', 'Rick Astley');
+  assert.equal(res.decision, 'SKIP_AUTO_MODE_OFF');
+  assert.deepEqual(S.plays, []);
+  assert.equal(storage.currentTrack.title, 'Never Gonna Give You Up');
+});
+
+test('auto mode ON: new track pauses YouTube and plays on Tudo, confirmed by GET /me/player', async () => {
+  storage.autoModeEnabled = true;
+  const res = await detect('Never Gonna Give You Up', 'Rick Astley');
+  assert.equal(res.decision, 'TRIGGER');
+  assert.equal(res.handoff.success, true, res.handoff.message);
+  assert.equal(res.handoff.confirmed, true);
+  assert.equal(res.handoff.device, 'Tudo');
+  assert.deepEqual(S.plays, ['spotify:track:rick']);
+  assert.deepEqual(tabMessages, ['PAUSE_AND_MUTE_YOUTUBE']);
+  assert.equal(storage.handoffState, 'PLAYING');
+  assert.equal(storage.lastHandoffResult.status, 'confirmed');
+});
+
+test('same track on the same page is not sent again', async () => {
+  const res = await detect('Never Gonna Give You Up', 'Rick Astley');
+  assert.equal(res.decision, 'SKIP_ALREADY_SYNCED');
+  assert.deepEqual(S.plays, []);
+});
+
+test('F5 (new pageInstanceId) sends the same track again', async () => {
+  const res = await detect('Never Gonna Give You Up', 'Rick Astley', 'page-2');
+  assert.equal(res.decision, 'TRIGGER');
+  assert.equal(res.handoff.success, true);
+});
+
+test('changing the track on YouTube changes it on Spotify', async () => {
+  const res = await detect('Take On Me', 'a-ha', 'page-2');
+  assert.equal(res.handoff.success, true);
+  assert.equal(S.player.item.uri, 'spotify:track:aha');
+});
+
+test('rapid changes: the middle track is dropped and the last one plays', async () => {
+  const results = await Promise.all([
+    detect('Bohemian Rhapsody', 'Queen', 'page-2'),
+    detect('Admirável Chip Novo', 'Pitty', 'page-2'),
+    detect('Die With A Smile', 'Lady Gaga', 'page-2')
+  ]);
+  assert.equal(results[1].handoff.superseded, true);
+  assert.ok(!S.plays.includes('spotify:track:pitty'));
+  assert.equal(S.plays.at(-1), 'spotify:track:gaga');
+});
+
+test('inactive device (404): transfers the session and plays', async () => {
+  S.failPlay = [404];
+  const res = await detect('POWER', 'Kanye West', 'page-2');
+  assert.equal(res.handoff.success, true, res.handoff.message);
+  assert.ok(S.calls.includes('PUT api.spotify.com/v1/me/player'));
+  assert.deepEqual(S.plays, ['spotify:track:power']);
+});
+
+test('failed attempt is not marked as synced, so the retry goes through', async () => {
+  S.devices = [];
+  const first = await detect('Take On Me', 'a-ha', 'page-3');
+  assert.equal(first.handoff.success, false);
+  assert.equal(first.handoff.retryable, true);
+  assert.equal(first.handoff.errorCode, 'DEVICE_UNAVAILABLE');
+  assert.equal(storage.lastAutoSync, undefined);
+  assert.deepEqual(tabMessages, [], 'YouTube must not be paused when no device is available');
+
+  S.devices = [TUDO];
+  const retry = await detect('Take On Me', 'a-ha', 'page-3', { reason: 'retry-1' });
+  assert.equal(retry.decision, 'TRIGGER');
+  assert.equal(retry.handoff.success, true);
+});
+
+test('weak match (similar title, wrong artist) is not played and not retried', async () => {
+  const res = await detect('Power Rangers Theme', 'Kids TV', 'page-3');
+  assert.equal(res.handoff.success, false);
+  assert.equal(res.handoff.errorCode, 'MATCH_UNCERTAIN');
+  assert.equal(res.handoff.retryable, false);
+  assert.deepEqual(S.plays, []);
+});
+
+test('play accepted but not visible in GET /me/player is reported as unconfirmed', async () => {
+  S.playerUpdates = false;
+  S.player = null;
+  const res = await detect('Bohemian Rhapsody', 'Queen', 'page-3');
+  assert.equal(res.handoff.success, true);
+  assert.equal(res.handoff.confirmed, false);
+  assert.equal(storage.handoffState, 'PLAY_UNCONFIRMED');
+  assert.equal(storage.lastHandoffResult.status, 'unconfirmed');
+});
+
+test('fallback to Tudo does not overwrite the preferred device', async () => {
+  storage.targetDeviceName = 'Echo Pop';
+  storage.targetDeviceId = 'dev-echo';
+
+  const offline = await detect('Take On Me', 'a-ha', 'page-4');
+  assert.equal(offline.handoff.device, 'Tudo');
+  assert.equal(storage.targetDeviceId, 'dev-echo');
+
+  S.devices = [TUDO, ECHO];
+  const back = await detect('POWER', 'Kanye West', 'page-4');
+  assert.equal(back.handoff.device, 'Echo Pop');
+
+  delete storage.targetDeviceName;
+  delete storage.targetDeviceId;
+});
+
+test('Spotify refuses the play after YouTube was paused: sound goes back to YouTube', async () => {
+  S.failPlay = [403];
+  const res = await detect('Admirável Chip Novo', 'Pitty', 'page-5');
+  assert.equal(res.handoff.success, false);
+  assert.equal(res.handoff.retryable, false);
+  assert.deepEqual(tabMessages, ['PAUSE_AND_MUTE_YOUTUBE', 'RESTORE_YOUTUBE']);
+});
+
+test('manual handoff with an old stored currentTrack (only normalizedTitle) works', async () => {
+  storage.currentTrack = { normalizedTitle: 'Die With A Smile', normalizedArtist: 'Lady Gaga' };
+  storage.currentTrackTabId = 7;
+  const res = await send({ type: 'TRIGGER_HANDOFF' }, {});
+  assert.equal(res.success, true, res.message);
+  assert.deepEqual(S.plays, ['spotify:track:gaga']);
+});
+
+test('401 before the token expires: refreshes once and repeats the call', async () => {
+  S.validAccess = 'rotated-elsewhere';
+  const before = S.refreshCalls;
+  const res = await detect('Take On Me', 'a-ha', 'page-6');
+  assert.equal(res.handoff.success, true, res.handoff.message);
+  assert.equal(S.refreshCalls, before + 1);
+});
+
+test('concurrent refresh with a rotating refresh token happens once and keeps the session', async () => {
+  storage.spotify_token_expires_at = 0;
+  const before = S.refreshCalls;
+  const a = new SpotifyClient();
+  const b = new SpotifyClient();
+  const tokens = await Promise.all([a.getAccessToken(), b.getAccessToken(), a.getAccessToken()]);
+  assert.equal(S.refreshCalls, before + 1);
+  assert.equal(new Set(tokens).size, 1);
+  assert.notEqual(storage.engineState, 'AUTH_REQUIRED');
+});
+
+test('revoked refresh token: AUTH_REQUIRED, tokens removed, no retry', async () => {
+  Object.assign(storage, { spotify_refresh_token: 'revoked', spotify_token_expires_at: 0 });
+  const res = await detect('POWER', 'Kanye West', 'page-7');
+  assert.equal(res.handoff.success, false);
+  assert.equal(res.handoff.errorCode, 'AUTH_REQUIRED');
+  assert.equal(res.handoff.retryable, false);
+  assert.equal(storage.spotify_access_token, undefined);
+  assert.equal(storage.engineState, 'AUTH_REQUIRED');
+});
+
+test('without a Spotify account no request reaches the Web API', async () => {
+  const res = await detect('Bohemian Rhapsody', 'Queen', 'page-8');
+  assert.equal(res.handoff.errorCode, 'AUTH_REQUIRED');
+  assert.deepEqual(S.calls.filter(c => c.includes('api.spotify.com')), []);
+});
+
+test('login: PKCE authorize URL, state check, code exchange and tokens stored', async () => {
+  let authorize;
+  identityHandler = (url) => {
+    authorize = new URL(url).searchParams;
+    return `https://testextid.chromiumapp.org/spotify?code=good-code&state=${authorize.get('state')}`;
+  };
+  const res = await send({ type: 'SPOTIFY_LOGIN' }, {});
+  assert.equal(res.success, true, res.message);
+
+  assert.equal(authorize.get('response_type'), 'code');
+  assert.equal(authorize.get('code_challenge_method'), 'S256');
+  assert.equal(authorize.get('redirect_uri'), 'https://testextid.chromiumapp.org/spotify');
+  assert.match(authorize.get('scope'), /user-modify-playback-state/);
+
+  const exchange = S.codeExchanges.at(-1);
+  const expectedChallenge = createHash('sha256').update(exchange.code_verifier).digest('base64url');
+  assert.equal(authorize.get('code_challenge'), expectedChallenge);
+  assert.ok(exchange.code_verifier.length >= 43);
+
+  assert.equal(storage.spotify_access_token, S.validAccess);
+  assert.equal(storage.engineState, 'READY');
+
+  const handoff = await detect('POWER', 'Kanye West', 'page-9');
+  assert.equal(handoff.handoff.success, true, handoff.handoff.message);
+});
+
+test('login with a mismatching state is rejected and stores nothing', async () => {
+  const tokenBefore = storage.spotify_access_token;
+  identityHandler = () => 'https://testextid.chromiumapp.org/spotify?code=good-code&state=forged';
+  const res = await send({ type: 'SPOTIFY_LOGIN' }, {});
+  assert.equal(res.success, false);
+  assert.match(res.message, /state/);
+  assert.equal(storage.spotify_access_token, tokenBefore);
+  assert.match(storage.authError, /state/);
+});
+
+test('logout removes the tokens', async () => {
+  const res = await send({ type: 'SPOTIFY_LOGOUT' }, {});
+  assert.equal(res.success, true);
+  assert.equal(storage.spotify_access_token, undefined);
+  assert.equal(storage.spotify_refresh_token, undefined);
+  assert.equal(storage.engineState, 'AUTH_REQUIRED');
+});
+
+test('telemetry keeps every event written concurrently', async () => {
+  storage.telemetryLogs = [];
+  await Promise.all(Array.from({ length: 30 }, (_, i) => logTelemetry(`EVT_${i}`)));
+  assert.equal(storage.telemetryLogs.length, 30);
+});

@@ -3,12 +3,13 @@
 import { SpotifyProvider } from '../providers/spotify-provider.js';
 import { scoreTrackMatch } from '../shared/confidence-engine.js';
 import { logTelemetry } from '../shared/logger.js';
+import { loginWithSpotify, logoutSpotify } from '../shared/auth.js';
 
 const spotify = new SpotifyProvider();
 
-// Confidence threshold: below this, match is considered uncertain
-const MIN_CONFIDENCE = 40;
-const VERIFY_ATTEMPTS = 3;
+// Below this the match is uncertain: a title that merely contains the query with a wrong artist scores 40
+const MIN_CONFIDENCE = 50;
+const VERIFY_ATTEMPTS = 4;
 const VERIFY_INTERVAL_MS = 1000;
 const TRANSFER_SETTLE_MS = 800;
 
@@ -28,13 +29,14 @@ function generateCorrelationId() {
 const HandoffState = {
   IDLE: 'IDLE',
   DETECTED: 'DETECTED',
-  QUEUED: 'QUEUED',
   MATCHING: 'MATCHING',
   DEVICE_RESOLVING: 'DEVICE_RESOLVING',
   READY_TO_TRANSFER: 'READY_TO_TRANSFER',
   PLAY_COMMAND_SENT: 'PLAY_COMMAND_SENT',
   VERIFYING: 'VERIFYING',
   PLAYING: 'PLAYING',
+  // Spotify accepted the play, but GET /me/player did not show it yet (Alexa groups can lag)
+  PLAY_UNCONFIRMED: 'PLAY_UNCONFIRMED',
   // Error states
   AUTH_REQUIRED: 'AUTH_REQUIRED',
   MATCH_UNCERTAIN: 'MATCH_UNCERTAIN',
@@ -51,8 +53,15 @@ async function setHandoffState(state, correlationId) {
   });
 }
 
+// Spotify client errors start with a code (see shared/spotify-client.js)
+function classifyError(message = '') {
+  if (message.startsWith('AUTH_REQUIRED')) return { state: HandoffState.AUTH_REQUIRED, retryable: false };
+  if (message.startsWith('QUOTA_EXCEEDED')) return { state: HandoffState.RATE_LIMITED, retryable: false };
+  if (message.startsWith('RATE_LIMITED')) return { state: HandoffState.RATE_LIMITED, retryable: true };
+  return { state: HandoffState.TEMPORARY_FAILURE, retryable: true };
+}
+
 // Normalize incoming payload to a canonical track object
-// Content script sends {title, artist, ...} as primary fields now
 function toTrack(payload) {
   if (!payload) return null;
   const title = payload.title || payload.normalizedTitle || payload.rawTitle || '';
@@ -70,25 +79,77 @@ function toTrack(payload) {
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const handler = {
     NOW_PLAYING_DETECTED: () => onTrackDetected(message.payload, sender),
-    TRIGGER_HANDOFF: () => onManualHandoff(message, sender)
+    TRIGGER_HANDOFF: () => onManualHandoff(message, sender),
+    SPOTIFY_LOGIN: () => onLogin(),
+    SPOTIFY_LOGOUT: () => onLogout()
   }[message.type];
   if (!handler) return false;
 
+  const reply = (response) => {
+    try {
+      sendResponse(response);
+    } catch (e) {
+      // Sender is gone (e.g. popup closed while the Spotify login window was open)
+    }
+  };
+
   handler()
-    .then(sendResponse)
+    .then(reply)
     .catch(async (err) => {
       await logTelemetry('SERVICE_WORKER_ERROR', { error: err.message });
-      sendResponse({ success: false, message: err.message });
+      reply({ success: false, message: err.message });
     });
   return true; // keep sendResponse channel open for async
 });
+
+// ───── Spotify Account ─────
+async function onLogin() {
+  await logTelemetry('AUTH_LOGIN_START', {});
+  try {
+    await loginWithSpotify();
+    await chrome.storage.local.remove('authError');
+    await logTelemetry('AUTH_LOGIN_OK', {});
+    return { success: true };
+  } catch (err) {
+    await chrome.storage.local.set({ authError: err.message });
+    await logTelemetry('AUTH_LOGIN_FAILED', { error: err.message });
+    return { success: false, message: err.message };
+  }
+}
+
+async function onLogout() {
+  await logoutSpotify();
+  await logTelemetry('AUTH_LOGOUT', {});
+  return { success: true };
+}
+
+// lastAutoSync dedupes detections. It is written when the attempt starts (so A → B → A still
+// sends A again) and rolled back if that same attempt fails (so a retry is not skipped).
+async function markSyncAttempt(track, attemptId) {
+  await chrome.storage.local.set({
+    lastAutoSync: {
+      signature: track.signature,
+      pageInstanceId: track.pageInstanceId,
+      attemptId,
+      at: Date.now()
+    }
+  });
+}
+
+async function rollbackSyncAttempt(attemptId) {
+  const { lastAutoSync } = await chrome.storage.local.get('lastAutoSync');
+  if (lastAutoSync?.attemptId === attemptId) {
+    await chrome.storage.local.remove('lastAutoSync');
+  }
+}
 
 // ───── Auto Mode: Track Detected ─────
 async function onTrackDetected(payload, sender) {
   const track = toTrack(payload);
   if (!track) return { success: false, decision: 'IGNORED_NO_TITLE' };
 
-  const correlationId = payload.correlationId || generateCorrelationId();
+  // Always generated here: content script counters restart on every page load
+  const correlationId = generateCorrelationId();
   const tabId = sender.tab?.id;
 
   await logTelemetry('TRACK_DETECTED', {
@@ -100,7 +161,8 @@ async function onTrackDetected(payload, sender) {
     reason: track.reason,
     tabId,
     signature: track.signature,
-    pageInstanceId: track.pageInstanceId
+    pageInstanceId: track.pageInstanceId,
+    sourceCorrelationId: payload.correlationId
   }, correlationId);
 
   await setHandoffState(HandoffState.DETECTED, correlationId);
@@ -132,6 +194,7 @@ async function onTrackDetected(payload, sender) {
     isNewTrack,
     isNewPage,
     previousSignature: lastAutoSync?.signature || null,
+    reason: track.reason,
     decision
   }, correlationId);
 
@@ -140,14 +203,7 @@ async function onTrackDetected(payload, sender) {
     return { success: true, decision };
   }
 
-  // Record this sync attempt (before enqueue, so rapid-fire tracks update correctly)
-  await chrome.storage.local.set({
-    lastAutoSync: {
-      signature: track.signature,
-      pageInstanceId: track.pageInstanceId,
-      at: Date.now()
-    }
-  });
+  await markSyncAttempt(track, correlationId);
 
   await logTelemetry('HANDOFF_INTENT_CREATED', {
     title: track.title,
@@ -164,12 +220,18 @@ async function onTrackDetected(payload, sender) {
       {
         title: track.title,
         trackName: handoff.trackName,
+        confirmed: handoff.confirmed,
         error: handoff.success ? undefined : handoff.message,
+        retryable: handoff.retryable,
         elapsedMs: handoff.elapsedMs,
         device: handoff.device
       },
       correlationId
     );
+  }
+
+  if (!handoff.success && !handoff.superseded) {
+    await rollbackSyncAttempt(correlationId);
   }
 
   return { success: true, decision, handoff };
@@ -199,13 +261,7 @@ async function onManualHandoff(message, sender) {
 
   if (result.success && track) {
     // Prevent auto mode from re-sending the same track after manual handoff
-    await chrome.storage.local.set({
-      lastAutoSync: {
-        signature: track.signature,
-        pageInstanceId: track.pageInstanceId,
-        at: Date.now()
-      }
-    });
+    await markSyncAttempt(track, correlationId);
   }
 
   return result;
@@ -224,8 +280,7 @@ function enqueueHandoff(job) {
         seq,
         latestSeq: latestAutoSeq
       }, job.correlationId);
-      await setHandoffState(HandoffState.IDLE, job.correlationId);
-      return { success: false, superseded: true, message: 'Substituído por faixa mais recente.' };
+      return { success: false, superseded: true, retryable: false, message: 'Substituído por faixa mais recente.' };
     }
 
     await logTelemetry('HANDOFF_STARTED', {
@@ -295,15 +350,21 @@ async function executeHandoff({ track, tabId, origin, correlationId }) {
   const startedAt = Date.now();
   let pausedTab = false;
 
-  const fail = async (stage, state, message, data = {}) => {
-    await logTelemetry(stage, { error: message, ...data }, correlationId);
+  // Shown in the popup so the user can tell whether the last handoff really worked
+  const recordResult = (fields) => chrome.storage.local.set({
+    lastHandoffResult: { origin, correlationId, title: track?.title || null, at: Date.now(), ...fields }
+  });
+
+  const fail = async (stage, state, message, { retryable = false, ...data } = {}) => {
+    await logTelemetry(stage, { error: message, retryable, ...data }, correlationId);
     await setHandoffState(state, correlationId);
     await chrome.storage.local.set({ lastHandoffError: message });
     // If we paused YouTube but Spotify didn't take over, restore audio
     if (pausedTab) {
       await sendToTab(tabId, { type: 'RESTORE_YOUTUBE' });
     }
-    return { success: false, message, elapsedMs: Date.now() - startedAt };
+    await recordResult({ status: 'failed', message });
+    return { success: false, retryable, errorCode: state, message, elapsedMs: Date.now() - startedAt };
   };
 
   if (!track?.title) {
@@ -339,7 +400,7 @@ async function executeHandoff({ track, tabId, origin, correlationId }) {
     if (!target) {
       return fail('DEVICE_UNAVAILABLE', HandoffState.DEVICE_UNAVAILABLE,
         'Dispositivo preferido não encontrado. Verifique se está ativo no Spotify.',
-        { preferredName: targetDeviceName || 'Tudo' });
+        { retryable: true, preferredName: targetDeviceName || 'Tudo' });
     }
 
     const device = target.device;
@@ -350,8 +411,9 @@ async function executeHandoff({ track, tabId, origin, correlationId }) {
       matchedBy: target.matchedBy
     }, correlationId);
 
-    // Update cached device ID if it changed
-    if (target.matchedBy !== 'id' && device.id !== targetDeviceId) {
+    // Refresh the cached ID only when the preferred device itself was found under a new ID.
+    // A fallback match must not overwrite the user's choice.
+    if (['name', 'partial-name'].includes(target.matchedBy) && device.id !== targetDeviceId) {
       await chrome.storage.local.set({ targetDeviceId: device.id });
     }
 
@@ -408,8 +470,8 @@ async function executeHandoff({ track, tabId, origin, correlationId }) {
       }, correlationId);
 
       const transfer = await spotify.transferPlayback(device.id, false);
-      await logTelemetry('SPOTIFY_PLAY_RESPONSE', {
-        stage: 'transfer', status: transfer.status, error: transfer.error
+      await logTelemetry('SPOTIFY_TRANSFER_RESPONSE', {
+        status: transfer.status, error: transfer.error
       }, correlationId);
 
       await sleep(TRANSFER_SETTLE_MS);
@@ -421,26 +483,32 @@ async function executeHandoff({ track, tabId, origin, correlationId }) {
     }, correlationId);
 
     if (!play.ok) {
-      return fail('SPOTIFY_PLAY_FAILED', HandoffState.FAILED,
+      const { state, retryable } = play.status === 0
+        ? classifyError(play.error)
+        : { state: HandoffState.FAILED, retryable: play.status === 404 || play.status === 429 || play.status >= 500 };
+      return fail('SPOTIFY_PLAY_FAILED', state,
         `Spotify recusou o play (${play.status}): ${play.error || 'sem detalhes'}`,
-        { status: play.status, device: device.name });
+        { retryable, status: play.status, device: device.name });
     }
 
     // ── Step 7: Verify actual playback (204 ≠ confirmed) ──
     await setHandoffState(HandoffState.VERIFYING, correlationId);
 
     const verification = await verifyPlayback(device.id, candidate.uri, correlationId);
+    const confirmed = verification.verified;
 
-    if (verification.verified) {
-      await setHandoffState(HandoffState.PLAYING, correlationId);
-    } else {
-      await setHandoffState(HandoffState.TEMPORARY_FAILURE, correlationId);
-    }
-
+    await setHandoffState(confirmed ? HandoffState.PLAYING : HandoffState.PLAY_UNCONFIRMED, correlationId);
+    await logTelemetry(confirmed ? 'PLAYBACK_CONFIRMED' : 'PLAYBACK_UNCONFIRMED', verification, correlationId);
     await chrome.storage.local.remove('lastHandoffError');
+    await recordResult({
+      status: confirmed ? 'confirmed' : 'unconfirmed',
+      trackName: matchInfo.trackName,
+      device: device.name
+    });
 
     return {
       success: true,
+      confirmed,
       ...matchInfo,
       device: device.name,
       playStatus: play.status,
@@ -448,6 +516,7 @@ async function executeHandoff({ track, tabId, origin, correlationId }) {
       elapsedMs: Date.now() - startedAt
     };
   } catch (err) {
-    return fail('HANDOFF_ERROR', HandoffState.FAILED, err.message);
+    const { state, retryable } = classifyError(err.message);
+    return fail('HANDOFF_ERROR', state, err.message, { retryable });
   }
 }
