@@ -1,0 +1,28 @@
+/* Estilização do botão discreto dentro do player do YouTube */
+.sync-music-quick-action {
+  background: transparent;
+  border: none;
+  color: #fff;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 8px;
+  margin-right: 8px;
+  vertical-align: middle;
+  border-radius: 50%;
+  transition: all 0.2s ease-in-out;
+  outline: none;
+}
+
+.sync-music-quick-action:hover {
+  background: rgba(255, 255, 255, 0.2);
+  color: #1DB954;
+  transform: scale(1.1);
+}
+
+.sync-music-quick-action.sync-active {
+  background: #1DB954;
+  color: #000;
+  box-shadow: 0 0 10px #1DB954;
+}
