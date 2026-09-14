@@ -1,10 +1,14 @@
 // Background Service Worker (Manifest V3 Modular)
+// Implementa Fila Single-Flight + Latest-Wins, Contrato Canônico e Telemetria Completa
 import { SpotifyProvider } from '../providers/spotify-provider.js';
 import { scoreTrackMatch } from '../shared/confidence-engine.js';
 import { logTelemetry } from '../shared/logger.js';
 
 const spotify = new SpotifyProvider();
-let isExecutingHandoff = false;
+
+// Gerenciamento de Fila Single-Flight + Latest-Wins
+let isHandoffActive = false;
+let pendingHandoff = null;
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
@@ -14,9 +18,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await logTelemetry('YOUTUBE_TRACK_DETECTED', {
           title: track.title,
           artist: track.artist,
+          rawTitle: track.rawTitle,
+          isReload: !!track.isNavigationReload,
           url: sender.tab?.url
         });
 
+        // Atualiza track atual no storage
         await chrome.storage.local.set({
           currentTrack: track,
           lastDetectedAt: Date.now()
@@ -35,21 +42,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           autoModeEnabled: !!autoModeEnabled,
           currentTitle: track.title,
           lastSyncedTitle: lastSyncedTrackTitle,
-          isExecuting: isExecutingHandoff
+          isHandoffActive,
+          isNavigationReload: !!track.isNavigationReload
         });
 
+        // Condição: Nova música OU recarregamento de página (F5) com título ativo
         const isDifferentTrack = track.title && (track.title !== lastSyncedTrackTitle);
+        const shouldTrigger = autoModeEnabled && track.title && (isDifferentTrack || track.isNavigationReload);
 
-        if (autoModeEnabled && isDifferentTrack && !isExecutingHandoff) {
-          await logTelemetry('AUTO_MODE_TRIGGERED', { trackTitle: track.title });
+        if (shouldTrigger) {
+          await logTelemetry('AUTO_MODE_TRIGGERED', { 
+            trackTitle: track.title, 
+            reason: isDifferentTrack ? 'NEW_TRACK' : 'PAGE_RELOAD' 
+          });
+
           await chrome.storage.local.set({ lastSyncedTrackTitle: track.title });
 
-          // Dispara o Handoff
-          executeHandoff(true, sender.tab?.id, track).then(async (res) => {
-            await logTelemetry('AUTO_HANDOFF_RESULT', res);
-          }).catch(async (err) => {
-            await logTelemetry('AUTO_HANDOFF_ERROR', { error: err.message });
-          });
+          // Despacha para a Fila Single-Flight + Latest-Wins
+          scheduleHandoff(true, sender.tab?.id, track);
         }
 
         sendResponse({ success: true });
@@ -57,10 +67,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       } else if (message.type === 'TRIGGER_HANDOFF') {
         const { currentTrack } = await chrome.storage.local.get('currentTrack');
         const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-        const result = await executeHandoff(message.autoPause, activeTab?.id, currentTrack);
-        if (result.success) {
-          await chrome.storage.local.set({ lastSyncedTrackTitle: currentTrack?.title });
+        
+        if (currentTrack?.title) {
+          await chrome.storage.local.set({ lastSyncedTrackTitle: currentTrack.title });
         }
+        
+        const result = await scheduleHandoff(message.autoPause, activeTab?.id, currentTrack);
         sendResponse(result);
       }
     } catch (err) {
@@ -71,13 +83,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   return true;
 });
 
-// Executa o Handoff completo com telemetria passo a passo
-async function executeHandoff(autoPause, tabId, trackData) {
-  if (isExecutingHandoff) {
-    return { success: false, message: 'Handoff já em processamento.' };
+// Agendador com Política Single-Flight + Latest-Wins
+async function scheduleHandoff(autoPause, tabId, trackData) {
+  if (isHandoffActive) {
+    await logTelemetry('HANDOFF_QUEUED_LATEST_WINS', { 
+      displacedTrack: pendingHandoff?.track?.title || 'in-flight', 
+      newTrack: trackData?.title 
+    });
+    // Guarda a mais recente para rodar imediatamente ao término do atual
+    pendingHandoff = { autoPause, tabId, track: trackData };
+    return { success: true, queued: true, message: 'Operação enfileirada (Latest-Wins).' };
   }
-  isExecutingHandoff = true;
 
+  isHandoffActive = true;
+  let finalResult = null;
+
+  try {
+    finalResult = await executeHandoff(autoPause, tabId, trackData);
+  } finally {
+    isHandoffActive = false;
+    // Se houve uma música mais recente agendada durante a execução, roda a pendente
+    if (pendingHandoff) {
+      const next = pendingHandoff;
+      pendingHandoff = null;
+      await logTelemetry('EXECUTING_PENDING_HANDOFF', { track: next.track?.title });
+      scheduleHandoff(next.autoPause, next.tabId, next.track);
+    }
+  }
+
+  return finalResult;
+}
+
+// Executa o Handoff completo com telemetria e resolução dinâmica de dispositivos
+async function executeHandoff(autoPause, tabId, trackData) {
   try {
     const { targetDeviceId, autoPauseSetting } = await chrome.storage.local.get([
       'targetDeviceId',
@@ -85,7 +123,10 @@ async function executeHandoff(autoPause, tabId, trackData) {
     ]);
 
     const track = trackData || (await chrome.storage.local.get('currentTrack')).currentTrack;
-    if (!track || !track.title) {
+    const trackTitle = track?.title || track?.normalizedTitle || track?.rawTitle;
+    const trackArtist = track?.artist || track?.normalizedArtist || track?.rawArtist;
+
+    if (!track || !trackTitle) {
       return { success: false, message: 'Nenhuma música detectada no YouTube.' };
     }
 
@@ -105,17 +146,15 @@ async function executeHandoff(autoPause, tabId, trackData) {
     await logTelemetry('TARGET_DEVICE_RESOLVED', { deviceId });
 
     // 2. Busca no catálogo do Spotify
-    const searchTitle = track.normalizedTitle || track.title;
-    const searchArtist = track.normalizedArtist || track.artist;
-    await logTelemetry('SPOTIFY_SEARCHING', { title: searchTitle, artist: searchArtist });
+    await logTelemetry('SPOTIFY_SEARCHING', { title: trackTitle, artist: trackArtist });
 
-    const candidates = await spotify.searchTrack(searchTitle, searchArtist);
+    const candidates = await spotify.searchTrack(trackTitle, trackArtist);
     if (!candidates || candidates.length === 0) {
-      await logTelemetry('SPOTIFY_NO_MATCH', { title: searchTitle });
-      return { success: false, message: `Música "${searchTitle}" não encontrada no catálogo.` };
+      await logTelemetry('SPOTIFY_NO_MATCH', { title: trackTitle });
+      return { success: false, message: `Música "${trackTitle}" não encontrada no catálogo.` };
     }
 
-    // 3. Avalia o grau de confiança
+    // 3. Avalia o grau de confiança da melhor correspondência
     let bestCandidate = candidates[0];
     let highestConfidence = 0;
     for (const cand of candidates) {
@@ -133,7 +172,7 @@ async function executeHandoff(autoPause, tabId, trackData) {
       confidence: highestConfidence
     });
 
-    // 4. Pausa imediata da aba do YouTube
+    // 4. Pausa imediata da aba do YouTube para liberar o áudio
     if (autoPause || autoPauseSetting !== false) {
       try {
         if (tabId) {
@@ -146,7 +185,7 @@ async function executeHandoff(autoPause, tabId, trackData) {
       } catch (e) {}
     }
 
-    // 5. Transfere sessão e inicia reprodução no grupo Tudo
+    // 5. Transfere sessão e inicia reprodução no dispositivo Spotify Connect
     const token = await spotify.getAccessToken();
     await fetch('https://api.spotify.com/v1/me/player', {
       method: 'PUT',
@@ -174,7 +213,8 @@ async function executeHandoff(autoPause, tabId, trackData) {
       artist: bestCandidate.artists.map(a => a.name).join(', '),
       confidence: highestConfidence
     };
-  } finally {
-    isExecutingHandoff = false;
+  } catch (error) {
+    await logTelemetry('EXECUTE_HANDOFF_ERROR', { error: error.message });
+    return { success: false, message: error.message };
   }
 }

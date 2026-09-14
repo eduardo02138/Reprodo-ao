@@ -1,6 +1,8 @@
-// Content Script: Detecção contínua por MediaSession + DOM Fallback e Controle de Playback
+// Content Script: Detecção contínua por MediaSession + SPA Listeners + DOM Fallback e Controle de Playback
 (function() {
   let lastReportedTitle = '';
+  let isFirstLoad = true;
+  let navigationDebounceTimer = null;
 
   function getMediaElement() {
     return document.querySelector('video');
@@ -86,7 +88,7 @@
     };
   }
 
-  function monitorTrack() {
+  function monitorTrack(forceCheck = false) {
     const raw = extractMetadata();
     if (!raw.title) return;
 
@@ -96,22 +98,40 @@
       : { title: raw.title, artist: raw.artist };
 
     const cleanTitle = normalized.title || raw.title;
-    if (cleanTitle === lastReportedTitle) return;
+    const cleanArtist = normalized.artist || raw.artist;
+
+    if (!forceCheck && cleanTitle === lastReportedTitle) return;
     lastReportedTitle = cleanTitle;
 
+    const isReload = isFirstLoad;
+    isFirstLoad = false;
+
+    // Contrato Canônico Universal de Dados
     chrome.runtime.sendMessage({
       type: 'NOW_PLAYING_DETECTED',
       payload: {
+        title: cleanTitle,
+        artist: cleanArtist,
         rawTitle: raw.title,
         rawArtist: raw.artist,
         album: raw.album,
         artworkUrl: raw.artworkUrl,
         normalizedTitle: cleanTitle,
-        normalizedArtist: normalized.artist || raw.artist,
+        normalizedArtist: cleanArtist,
         metadataSource: raw.metadataSource,
-        source: raw.source
+        source: raw.source,
+        isNavigationReload: isReload,
+        timestamp: Date.now()
       }
     });
+  }
+
+  // Agenda monitoramento após eventos de navegação SPA do YouTube com debounce
+  function scheduleTrackCheck(delayMs = 400) {
+    clearTimeout(navigationDebounceTimer);
+    navigationDebounceTimer = setTimeout(() => {
+      monitorTrack(true);
+    }, delayMs);
   }
 
   // Injeta botão nativo de Handoff
@@ -162,26 +182,49 @@
         ? normalizeTrackInfo(raw.title, raw.artist)
         : { title: raw.title, artist: raw.artist };
 
+      const cleanTitle = normalized.title || raw.title;
+      const cleanArtist = normalized.artist || raw.artist;
+
       sendResponse({
         payload: {
+          title: cleanTitle,
+          artist: cleanArtist,
           rawTitle: raw.title,
           rawArtist: raw.artist,
           album: raw.album,
           artworkUrl: raw.artworkUrl,
-          normalizedTitle: normalized.title || raw.title,
-          normalizedArtist: normalized.artist || raw.artist,
+          normalizedTitle: cleanTitle,
+          normalizedArtist: cleanArtist,
           metadataSource: raw.metadataSource,
-          source: raw.source
+          source: raw.source,
+          timestamp: Date.now()
         }
       });
     }
   });
 
+  // Eventos Nativos de Navegação e Transição SPA do YouTube
+  window.addEventListener('yt-navigate-finish', () => scheduleTrackCheck(400));
+  window.addEventListener('yt-page-data-updated', () => scheduleTrackCheck(400));
+
+  // Escuta carregamento do elemento de vídeo
+  function attachVideoListeners() {
+    const video = getMediaElement();
+    if (video && !video.dataset.syncBound) {
+      video.dataset.syncBound = 'true';
+      video.addEventListener('loadeddata', () => scheduleTrackCheck(300));
+      video.addEventListener('play', () => scheduleTrackCheck(300));
+    }
+  }
+
   const observer = new MutationObserver(() => {
-    monitorTrack();
+    monitorTrack(false);
     injectHandoffButton();
+    attachVideoListeners();
   });
 
   observer.observe(document.body, { childList: true, subtree: true });
-  setInterval(monitorTrack, 1500);
+  attachVideoListeners();
+  setInterval(() => monitorTrack(false), 1500);
+  setTimeout(() => monitorTrack(true), 500);
 })();
