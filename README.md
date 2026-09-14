@@ -1,96 +1,98 @@
-# Sync Music — Multi-Device Handoff & Auto-Sync (Manifest V3)
+# Sync Music — Handoff do YouTube para Spotify Connect / Alexa
 
-Extensão para Google Chrome (Manifest V3) de alta fidelidade arquitetural para sincronização e transferência contínua (*handoff*) de músicas em reprodução no **YouTube** e **YouTube Music** diretamente para caixas de som **Spotify Connect**, grupos **Amazon Alexa** (ex: *Tudo*, *Casa*), Smart TVs e dispositivos de áudio conectados.
-
----
-
-## 🚀 Funcionalidades Principais
-
-- ⚡ **Modo Automático Resiliente (Auto Mode ON):**
-  - Monitoramento de eventos em Single Page Application (SPA) do YouTube (`yt-navigate-finish`, `yt-page-data-updated`, `pushState`, `replaceState`, `loadedmetadata`).
-  - **Fila com arquitetura *Single Flight + Latest-Wins*:** Se o usuário avançar várias faixas rapidamente (A → B → C), apenas a faixa final mais recente (C) assume a reprodução no Spotify Connect.
-  - **Prevenção de falsos positivos pós-F5:** Atribuição dinâmica de `pageInstanceId` e identificação por assinatura normalizada (`normalizedTitle|normalizedArtist`).
-  - **Ordem segura de execução:** Só pausa o áudio do YouTube quando a faixa no Spotify e o dispositivo de destino estiverem prontos para assumir, com fallback para restaurar o som em caso de falha.
-- 🎯 **Motor de Correspondência & Confiança (*Confidence Engine*):**
-  - Algoritmo ponderado de similaridade fonética e textual entre títulos e artistas do YouTube e catálogo Spotify.
-  - Limpeza automática de ruídos comuns de títulos do YouTube (*Clipe Oficial, Official Music Video, 4K, Remastered, Vevo, etc.*).
-- 🔊 **Seleção Dinâmica de Dispositivos & Volume Master:**
-  - Resolução resiliente de grupos e caixas (ex: grupo *Tudo* da Alexa) sem dependência de IDs voláteis.
-  - Proteção contra corridas assíncronas (*race conditions*) em ajustes rápidos de volume usando `AbortController`.
-- 🐞 **Painel de Depuração & Telemetria em Tempo Real:**
-  - Máquina de estados explícita (`IDLE`, `DETECTED`, `MATCHING`, `DEVICE_RESOLVING`, `READY_TO_TRANSFER`, `PLAY_COMMAND_SENT`, `VERIFYING`, `PLAYING`).
-  - Cada ciclo gera um `correlationId` rastreável.
-  - Exportação e cópia de logs com rotação automática em memória persistente (`chrome.storage.local`).
-- 🔒 **Segurança e Conformidade Manifest V3:**
-  - Arquitetura OAuth 2.0 PKCE.
-  - Nenhuma chave secreta ou refresh token empacotado no repositório.
+Extensão para Google Chrome (Manifest V3). Detecta a música tocando no **YouTube** ou **YouTube Music** e toca a mesma faixa num dispositivo **Spotify Connect** — por exemplo o grupo de Alexas **Tudo**, uma Echo ou uma Fire TV.
 
 ---
 
-## 📁 Estrutura do Projeto
+## Funções
 
-```
-sync-music-extension/
-├── manifest.json              # Manifesto V3 modular (Service Worker + Content Scripts)
-├── .gitignore                 # Exclusão de tokens, logs e arquivos de ambiente
-├── background/
-│   └── service-worker.js      # Orquestrador assíncrono, State Machine e Fila Latest-Wins
-├── content/
-│   ├── track-normalizer.js    # Normalizador de títulos e remoção de ruídos
-│   ├── youtube.js             # Content Script (MediaSession, SPA navigation e HUD)
-│   └── youtube.css            # Estilização do botão rápido injetado no player
-├── popup/
-│   ├── popup.html             # Interface gráfica do usuário
-│   ├── popup.css              # Design escuro no padrão Spotify Connect
-│   └── popup.js               # Controlador do popup, sliders, switch e painel debug
-├── providers/
-│   └── spotify-provider.js    # Camada de integração com a Spotify Web API
-├── shared/
-│   ├── auth.js                # Fluxo OAuth 2.0 PKCE para extensões Chrome
-│   ├── confidence-engine.js   # Algoritmo de pontuação e matching de catálogo
-│   ├── logger.js              # Sistema de telemetria persistente com Correlation ID
-│   └── spotify-client.js      # Cliente HTTP com auto-refresh, retry de 429 e rate-limit
-└── tests/
-    ├── mock-chrome.js         # Mock isolado das APIs do Chrome para testes em Node.js
-    ├── test-unit.js           # Suíte de testes unitários (Sintaxe, Normalizer, Matcher)
-    └── test-integration.js    # Suíte de testes de integração (Pipeline, Fila, Storage)
-```
+- **Handoff manual:** botão ♫ no player do YouTube ou botão principal do popup.
+- **Modo automático** (chave ⚡ no popup):
+  - troca de música (playlist, outro vídeo, navegação interna do YouTube) e F5 enviam a faixa ao Spotify;
+  - ligar o modo com música tocando envia a faixa atual;
+  - trocas rápidas: só a última faixa toca (fila *latest-wins*);
+  - anúncios do YouTube são ignorados; a música vai quando o anúncio termina;
+  - páginas sem vídeo (home, busca) não disparam nada;
+  - título trocado pela tradução do YouTube (ex.: "Shape of You" → "A Sua Forma") não conta como música nova; vale o primeiro título visto no vídeo;
+  - falha transitória (dispositivo fora do ar, erro 5xx, rede) é re-tentada 2 vezes, após 10 s e 30 s. Match incerto, conta desconectada e recusa do Spotify (403) não são re-tentados;
+  - o YouTube só é pausado depois que a faixa e o dispositivo estão prontos. Se o Spotify recusar o play, o som volta para o YouTube.
+- **Confirmação real:** depois do play, a extensão consulta `GET /me/player`. O popup mostra o último envio como *tocando* (confirmado), *enviado, sem confirmação* ou *falhou* (com o motivo).
+- **Conta Spotify:** login OAuth 2.0 PKCE e desconectar, direto no popup.
+- **Controles:** play/pause, anterior/próxima, volume (com debounce e cancelamento de chamadas antigas) e escolha do dispositivo. Se o dispositivo escolhido sumir, a extensão usa o grupo **Tudo** sem apagar a sua escolha.
+- **Telemetria:** eventos com `correlationId`, painel de debug, copiar e exportar logs.
 
 ---
 
-## ⚙️ Como Instalar no Google Chrome
+## Instalação
 
-1. Clone ou baixe este repositório:
+1. Clone o repositório:
    ```bash
    git clone https://github.com/eduardo02138/Reprodo-ao.git
    ```
-2. Abra o Google Chrome e navegue até:
-   ```
-   chrome://extensions
-   ```
-3. No canto superior direito, ative a chave **"Modo do desenvolvedor"** (*Developer mode*).
-4. Clique no botão **"Carregar sem compactação"** (*Load unpacked*).
-5. Selecione a pasta raiz da extensão (`sync-music-extension` ou a pasta clonada).
-6. A extensão estará pronta e visível na barra de ferramentas do Chrome.
+2. Abra `chrome://extensions`, ative **Modo do desenvolvedor**, clique em **Carregar sem compactação** e escolha a pasta do repositório.
+3. Abra o popup da extensão. Em "Primeiro acesso", copie a **Redirect URI** (`https://<id-da-extensão>.chromiumapp.org/spotify`).
+4. Em <https://developer.spotify.com/dashboard>, abra o app cujo Client ID está em `shared/spotify-config.js` (ou crie o seu app e troque o ID nesse arquivo) e adicione a Redirect URI.
+5. No popup, clique em **Conectar Spotify** e autorize.
+
+Requisitos:
+- Conta **Spotify Premium** (a Web API só controla reprodução em contas Premium).
+- O dispositivo precisa aparecer no Spotify Connect. Se as Alexas não aparecerem, diga "Alexa, tocar Spotify" para acordá-las.
 
 ---
 
-## 🧪 Testes Automatizados
+## Segurança
 
-O projeto conta com testes unitários e de integração sem resultados falsos ou hardcoded:
+- Nenhum token fica no código. Tokens ficam só no `chrome.storage.local` do seu navegador.
+- Os commits `08ec4cd`, `72bb9fc` e `06d59bc` deste repositório continham tokens reais do Spotify (`shared/default-token.json`). Se esses tokens eram da sua conta, revogue o acesso do app em <https://www.spotify.com/account/apps/>.
+- Refresh de token serializado entre popup e service worker (Web Locks). O Spotify rotaciona o refresh token; dois refresh simultâneos derrubariam a sessão.
+
+---
+
+## Testes
 
 ```bash
-# Executa os testes unitários (sintaxe estrita individual, normalização e pontuação)
-node tests/test-unit.js
-
-# Executa os testes de integração (fila latest-wins, decisões do modo automático, persistência)
-node tests/test-integration.js
+npm test
 ```
+Testes unitários do service worker **real** (`background/service-worker.js`) com `chrome.*` e a Web API do Spotify simulados: modo automático, F5, fila *latest-wins*, re-tentativa, confirmação, dispositivo preferido, 401/refresh, refresh concorrente, login PKCE e telemetria. Inclui normalização de títulos e pontuação de match.
 
-Ambos os scripts retornam status de saída real (`process.exitCode = 1` em caso de falha), garantindo validação em pipelines de CI/CD.
+```bash
+npm install
+npm run test:e2e
+```
+Carrega **esta pasta** como extensão no Chromium, usa o YouTube real e simula a API do Spotify. Nenhuma chamada chega ao Spotify e nada toca nas suas caixas. Precisa do Chromium do Playwright (`npx playwright install chromium`) ou de `CHROMIUM_PATH` apontando para um Chromium / Chrome for Testing; o Google Chrome comum ignora `--load-extension`. Relatório e captura do popup em `tests/e2e/.output/`.
 
 ---
 
-## 📄 Licença
+## Estrutura
 
-Este projeto é disponibilizado sob os termos da licença MIT.
+```
+manifest.json
+background/service-worker.js   Executor único de handoff, fila latest-wins, máquina de estados, login
+content/youtube.js             Detecção de faixa (MediaSession + eventos SPA), anúncios, re-tentativa, botão ♫
+content/track-normalizer.js    Limpeza de títulos do YouTube
+providers/spotify-provider.js  Dispositivos, busca, play, transferência, volume
+shared/spotify-client.js       Cliente Web API: refresh serializado, 401, 429/Retry-After
+shared/auth.js                 OAuth PKCE (chrome.identity)
+shared/spotify-config.js       Client ID e escopos
+shared/confidence-engine.js    Pontuação de match YouTube → Spotify
+shared/logger.js               Telemetria
+popup/                         Interface
+tests/unit/                    node --test
+tests/e2e/                     Playwright + YouTube real + Spotify simulado
+```
+
+---
+
+## Limitações conhecidas
+
+- Alexas levam de 1 a 3 s para começar, e grupos podem demorar a aparecer como ativos. Por isso "sem confirmação" não é tratado como erro nem re-tentado.
+- O match depende do título do vídeo. Títulos fora do padrão "Artista - Música" podem ficar abaixo da confiança mínima (50) e não são enviados.
+- A detecção de anúncios usa as classes do player do YouTube (`ad-showing`); não foi validada com anúncios do YouTube Music.
+- Quando o YouTube já abre o vídeo com o título traduzido, a busca usa essa tradução e pode não achar a faixa original (ou achar outra).
+- Fire TV e outras TVs não aceitam volume pela Web API.
+
+---
+
+## Licença
+
+MIT.

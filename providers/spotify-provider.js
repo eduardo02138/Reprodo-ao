@@ -15,7 +15,7 @@ export class SpotifyProvider {
   async getDevices() {
     const { res } = await this.client.request('/me/player/devices');
     if (!res.ok) {
-      throw new Error(`Erro ao obter dispositivos: ${res.status}`);
+      throw new Error(`TEMPORARY_FAILURE: Erro ao obter dispositivos (${res.status})`);
     }
     const data = await res.json();
     return data.devices || [];
@@ -71,23 +71,22 @@ export class SpotifyProvider {
     return null;
   }
 
-  // Busca faixa no catálogo com busca qualificada e fallback amplo
+  // Busca faixa no catálogo: qualificada → ampla → só título (canal do YouTube nem sempre é o artista)
   async searchTrack(title, artist) {
-    let query = `track:"${title}"`;
-    if (artist) query += ` artist:"${artist}"`;
+    const queries = [
+      artist ? `track:"${title}" artist:"${artist}"` : `track:"${title}"`,
+      artist ? `${title} ${artist}` : title,
+      title
+    ];
 
-    let { res } = await this.client.request(`/search?q=${encodeURIComponent(query)}&type=track&limit=5`);
-    let data = await res.json();
-
-    if (data.tracks?.items?.length > 0) {
-      return data.tracks.items;
+    for (const query of [...new Set(queries)]) {
+      const { res } = await this.client.request(`/search?q=${encodeURIComponent(query)}&type=track&limit=5`);
+      if (res.status === 400) continue;
+      if (!res.ok) throw new Error(`TEMPORARY_FAILURE: Busca no Spotify falhou (${res.status})`);
+      const data = await res.json();
+      if (data.tracks?.items?.length > 0) return data.tracks.items;
     }
-
-    // Fallback: broader search without field qualifiers
-    const fallbackQuery = artist ? `${title} ${artist}` : title;
-    const fallbackRes = await this.client.request(`/search?q=${encodeURIComponent(fallbackQuery)}&type=track&limit=5`);
-    data = await fallbackRes.res.json();
-    return data.tracks?.items || [];
+    return [];
   }
 
   // RC-6 FIX: Returns {ok, status, error} instead of boolean

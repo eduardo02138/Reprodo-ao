@@ -61,6 +61,7 @@
           <span id="auto-mode-badge" class="badge-auto-off">OFF</span>
         </div>
         <p class="auto-mode-desc">Troca no Spotify/Alexas assim que mudar no YouTube</p>
+        <p id="last-handoff" class="last-handoff hidden"></p>
       </div>
       <label class="switch">
         <input type="checkbox" id="auto-mode-toggle">
@@ -141,9 +142,21 @@
     <div id="status-message" class="status-box hidden"></div>
 
     <!-- Rodapé -->
+    <!-- Conta Spotify: configuração do primeiro login -->
+    <section id="auth-setup" class="auth-setup hidden">
+      <p>Primeiro acesso: cadastre esta Redirect URI no app do
+        <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>
+        e depois clique em <strong>Conectar Spotify</strong>.</p>
+      <div class="redirect-row">
+        <code id="redirect-uri"></code>
+        <button id="copy-redirect-btn" class="btn-sm-text" title="Copiar Redirect URI">📋</button>
+      </div>
+      <p id="auth-error" class="auth-error"></p>
+    </section>
+
     <footer class="footer">
-      <span id="auth-indicator" class="auth-text connected">Spotify: Conectado ✓</span>
-      <button id="refresh-token-btn" class="btn-link">Sincronizar</button>
+      <span id="auth-indicator" class="auth-text">Spotify: verificando…</span>
+      <button id="auth-btn" class="btn-link">Conectar Spotify</button>
     </footer>
   </div>
 
