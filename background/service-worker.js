@@ -80,7 +80,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   const handler = {
     NOW_PLAYING_DETECTED: () => onTrackDetected(message.payload, sender),
     TRIGGER_HANDOFF: () => onManualHandoff(message, sender),
-    SPOTIFY_LOGIN: () => onLogin(),
+    SPOTIFY_LOGIN: () => onLogin(message),
     SPOTIFY_LOGOUT: () => onLogout()
   }[message.type];
   if (!handler) return false;
@@ -103,17 +103,32 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 });
 
 // ───── Spotify Account ─────
-async function onLogin() {
-  await logTelemetry('AUTH_LOGIN_START', {});
+async function onLogin({ interactive = true } = {}) {
+  const mode = interactive ? 'interactive' : 'automatic';
+  await logTelemetry('AUTH_LOGIN_START', { mode });
   try {
-    await loginWithSpotify();
+    if (interactive) {
+      await loginWithSpotify({ interactive: true });
+    } else {
+      // No tokens: the client runs the silent login itself (lock + cooldown)
+      await spotify.getAccessToken();
+    }
     await chrome.storage.local.remove('authError');
-    await logTelemetry('AUTH_LOGIN_OK', {});
+    await logTelemetry('AUTH_LOGIN_OK', { mode });
+    await cacheProfileName();
     return { success: true };
   } catch (err) {
-    await chrome.storage.local.set({ authError: err.message });
-    await logTelemetry('AUTH_LOGIN_FAILED', { error: err.message });
+    // A failed automatic attempt is expected (never authorized, signed out of Spotify): no error banner
+    if (interactive) await chrome.storage.local.set({ authError: err.message });
+    await logTelemetry('AUTH_LOGIN_FAILED', { mode, error: err.message });
     return { success: false, message: err.message };
+  }
+}
+
+async function cacheProfileName() {
+  const profile = await spotify.getProfile().catch(() => null);
+  if (profile?.display_name) {
+    await chrome.storage.local.set({ spotifyDisplayName: profile.display_name });
   }
 }
 

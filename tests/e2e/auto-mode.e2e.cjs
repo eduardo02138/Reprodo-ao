@@ -101,6 +101,7 @@ async function routeSpotify(ctx) {
     if (u.hostname === 'accounts.spotify.com') {
       return json({ access_token: `mock-${t}`, refresh_token: 'mock-refresh', expires_in: 3600, token_type: 'Bearer' });
     }
+    if (p === '/v1/me') return json({ display_name: 'Conta Teste', product: 'premium' });
     if (p === '/v1/me/player/devices') {
       return json({ devices: spot.devices.map(d => ({ ...d, is_active: !!spot.player && d.id === spot.player.device.id })) });
     }
@@ -190,9 +191,13 @@ async function routeSpotify(ctx) {
       button: (await popup.textContent('#auth-btn')).trim(),
       setupVisible: await popup.isVisible('#auth-setup'),
       redirectUri: (await popup.textContent('#redirect-uri')).trim(),
-      devices: (await popup.textContent('#device-list')).trim()
+      devices: (await popup.textContent('#device-list')).trim(),
+      // The account card must be the first thing under the header, above the auto mode card
+      cardOnTop: await popup.evaluate(() =>
+        document.getElementById('account-card').getBoundingClientRect().top
+        < document.querySelector('.auto-mode-card').getBoundingClientRect().top)
     }));
-    const ok = /Conectar/.test(r.button) && /desconectado/.test(r.indicator) && r.setupVisible
+    const ok = /Conectar/.test(r.button) && /desconectado/.test(r.indicator) && r.setupVisible && r.cardOnTop
       && /^https:\/\/[a-z]+\.chromiumapp\.org\/spotify$/.test(r.redirectUri) && /Conecte/.test(r.devices);
     record('A0', 'Sem conta: popup oferece login e mostra a Redirect URI', ok ? 'PASS' : 'FAIL', r);
   } catch (e) { record('A0', 'Sem conta: popup oferece login e mostra a Redirect URI', 'FAIL', { error: e.message }); }
@@ -216,7 +221,7 @@ async function routeSpotify(ctx) {
         devices: await popup.$$eval('.device-name', els => els.map(e => e.textContent))
       };
     });
-    const ok = /Conectado/.test(r.indicator) && /Desconectar/.test(r.button) && !r.setupVisible && r.devices.includes('Tudo');
+    const ok = /Conectado como Conta Teste/.test(r.indicator) && /Desconectar/.test(r.button) && !r.setupVisible && r.devices.includes('Tudo');
     record('A1', 'Conectado: popup mostra estado real e lista dispositivos', ok ? 'PASS' : 'FAIL', r);
   } catch (e) { record('A1', 'Conectado: popup mostra estado real e lista dispositivos', 'FAIL', { error: e.message }); }
 

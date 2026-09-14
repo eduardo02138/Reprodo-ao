@@ -44,7 +44,7 @@ globalThis.chrome = {
   },
   identity: {
     getRedirectURL: (path) => `https://testextid.chromiumapp.org/${path}`,
-    launchWebAuthFlow: async ({ url }) => identityHandler(url)
+    launchWebAuthFlow: async (details) => identityHandler(details.url, details)
   }
 };
 
@@ -99,6 +99,7 @@ globalThis.fetch = async (url, opts = {}) => {
   if (opts.headers?.Authorization !== `Bearer ${S.validAccess}`) {
     return json({ error: { status: 401, message: 'The access token expired' } }, 401);
   }
+  if (u.pathname === '/v1/me') return json({ display_name: 'Conta Teste', product: 'premium' });
   if (u.pathname === '/v1/me/player/devices') return json({ devices: S.devices });
   if (u.pathname === '/v1/search') {
     const q = u.searchParams.get('q').toLowerCase();
@@ -328,6 +329,8 @@ test('login: PKCE authorize URL, state check, code exchange and tokens stored', 
 
   assert.equal(storage.spotify_access_token, S.validAccess);
   assert.equal(storage.engineState, 'READY');
+  assert.equal(storage.spotifyAuthorizedOnce, true);
+  assert.equal(storage.spotifyDisplayName, 'Conta Teste');
 
   const handoff = await detect('POWER', 'Kanye West', 'page-9');
   assert.equal(handoff.handoff.success, true, handoff.handoff.message);
@@ -341,6 +344,44 @@ test('login with a mismatching state is rejected and stores nothing', async () =
   assert.match(res.message, /state/);
   assert.equal(storage.spotify_access_token, tokenBefore);
   assert.match(storage.authError, /state/);
+});
+
+test('automatic login: a revoked session comes back without a window and the handoff goes through', async () => {
+  let details;
+  identityHandler = (url, d) => {
+    details = d;
+    return `https://testextid.chromiumapp.org/spotify?code=good-code&state=${new URL(url).searchParams.get('state')}`;
+  };
+  storage.lastSilentLoginAt = 0;
+  Object.assign(storage, { spotify_refresh_token: 'revoked', spotify_token_expires_at: 0 });
+
+  const res = await detect('Take On Me', 'a-ha', 'page-10');
+  assert.equal(res.handoff.success, true, res.handoff.message);
+  assert.equal(details.interactive, false, 'automatic login must not open a window');
+  assert.equal(storage.spotify_access_token, S.validAccess);
+});
+
+test('automatic login is throttled after an attempt', async () => {
+  let calls = 0;
+  identityHandler = () => { calls++; throw new Error('User interaction required.'); };
+  storage.lastSilentLoginAt = Date.now();
+  Object.assign(storage, { spotify_refresh_token: 'revoked', spotify_token_expires_at: 0 });
+
+  const res = await detect('POWER', 'Kanye West', 'page-11');
+  assert.equal(res.handoff.errorCode, 'AUTH_REQUIRED');
+  assert.equal(calls, 0);
+});
+
+test('popup automatic login message: no window, failure does not show an error banner', async () => {
+  let details;
+  identityHandler = (url, d) => { details = d; throw new Error('User interaction required.'); };
+  storage.lastSilentLoginAt = 0;
+  delete storage.authError;
+
+  const res = await send({ type: 'SPOTIFY_LOGIN', interactive: false }, {});
+  assert.equal(res.success, false);
+  assert.equal(details.interactive, false);
+  assert.equal(storage.authError, undefined);
 });
 
 test('login in a browser without chrome.identity fails with a clear message', async () => {
@@ -361,6 +402,16 @@ test('logout removes the tokens', async () => {
   assert.equal(storage.spotify_access_token, undefined);
   assert.equal(storage.spotify_refresh_token, undefined);
   assert.equal(storage.engineState, 'AUTH_REQUIRED');
+});
+
+test('after logout the automatic login stays off', async () => {
+  let calls = 0;
+  identityHandler = () => { calls++; return 'https://testextid.chromiumapp.org/spotify?code=good-code&state=x'; };
+  storage.lastSilentLoginAt = 0;
+  const res = await detect('Bohemian Rhapsody', 'Queen', 'page-12');
+  assert.equal(res.handoff.errorCode, 'AUTH_REQUIRED');
+  assert.equal(calls, 0);
+  assert.equal(storage.spotifyAuthorizedOnce, false);
 });
 
 test('telemetry keeps every event written concurrently', async () => {

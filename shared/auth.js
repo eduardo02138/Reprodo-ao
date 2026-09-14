@@ -26,8 +26,10 @@ export function getRedirectUri() {
   return chrome.identity.getRedirectURL('spotify');
 }
 
-// Runs in the service worker: the popup closes as soon as the Spotify window takes focus
-export async function loginWithSpotify() {
+// Interactive login runs in the service worker: the popup closes when the Spotify window takes focus.
+// interactive=false is the automatic login: no window, it only succeeds when the user already
+// authorized the app and is still signed in to Spotify in this browser.
+export async function loginWithSpotify({ interactive = true } = {}) {
   const verifier = randomToken(64);
   const state = randomToken(16);
   const redirectUri = getRedirectUri();
@@ -43,9 +45,16 @@ export async function loginWithSpotify() {
 
   let redirectUrl;
   try {
-    redirectUrl = await chrome.identity.launchWebAuthFlow({ url: authUrl.toString(), interactive: true });
+    redirectUrl = await chrome.identity.launchWebAuthFlow({
+      url: authUrl.toString(),
+      interactive,
+      // Silent attempt: let Spotify redirect on its own, then give up instead of waiting for a click
+      ...(interactive ? {} : { abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: 10000 })
+    });
   } catch (err) {
-    throw new Error(`Login cancelado ou bloqueado: ${err.message}`);
+    throw new Error(interactive
+      ? `Login cancelado ou bloqueado: ${err.message}`
+      : `Login automático não foi possível: ${err.message}`);
   }
   if (!redirectUrl) throw new Error('Login cancelado.');
 
@@ -83,7 +92,9 @@ async function exchangeCodeForToken(code, redirectUri, codeVerifier) {
     spotify_access_token: data.access_token,
     spotify_refresh_token: data.refresh_token,
     spotify_token_expires_at: Date.now() + data.expires_in * 1000,
-    engineState: 'READY'
+    engineState: 'READY',
+    // Enables the automatic (silent) login when this session is lost later
+    spotifyAuthorizedOnce: true
   });
 
   // Tokens stay in storage only; never return them to callers that might log them
@@ -91,6 +102,7 @@ async function exchangeCodeForToken(code, redirectUri, codeVerifier) {
 }
 
 export async function logoutSpotify() {
-  await chrome.storage.local.remove(TOKEN_KEYS);
-  await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
+  await chrome.storage.local.remove([...TOKEN_KEYS, 'spotifyDisplayName']);
+  // An explicit logout must not be undone by the automatic login
+  await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED', spotifyAuthorizedOnce: false });
 }
