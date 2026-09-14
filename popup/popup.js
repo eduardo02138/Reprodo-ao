@@ -156,8 +156,13 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   // ───── 4. Spotify Account ─────
+  // chrome.identity is missing in some Chromium-based browsers: the popup must keep working,
+  // only the Spotify login becomes unavailable
+  const identityAvailable = typeof chrome.identity?.getRedirectURL === 'function';
   if (redirectUriEl) {
-    redirectUriEl.textContent = chrome.identity.getRedirectURL('spotify');
+    redirectUriEl.textContent = identityAvailable
+      ? chrome.identity.getRedirectURL('spotify')
+      : 'Indisponível: este navegador não oferece chrome.identity';
   }
 
   async function renderAuthState() {
@@ -179,6 +184,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         await loadDevices();
         showStatus('Spotify desconectado', '#888');
       });
+      return;
+    }
+
+    if (!identityAvailable) {
+      showStatus('Login indisponível neste navegador (sem chrome.identity). Use Google Chrome ou Microsoft Edge.', '#ff5555');
       return;
     }
 

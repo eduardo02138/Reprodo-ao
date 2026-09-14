@@ -20,6 +20,9 @@ export async function generateCodeChallenge(codeVerifier) {
 
 // Must be registered as a Redirect URI of the app in the Spotify Developer Dashboard
 export function getRedirectUri() {
+  if (typeof chrome.identity?.getRedirectURL !== 'function') {
+    throw new Error('Login indisponível: este navegador não oferece a API chrome.identity (use Google Chrome ou Microsoft Edge e recarregue a extensão).');
+  }
   return chrome.identity.getRedirectURL('spotify');
 }
 
