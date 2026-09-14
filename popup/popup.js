@@ -1,7 +1,8 @@
+// popup.js — Popup controller with all logic inside DOMContentLoaded
 import { SpotifyProvider } from '../providers/spotify-provider.js';
 
 document.addEventListener('DOMContentLoaded', async () => {
-  // Elementos do Card e Artwork
+  // ───── Element References ─────
   const trackTitleEl = document.getElementById('track-title');
   const trackArtistEl = document.getElementById('track-artist');
   const trackArtwork = document.getElementById('track-artwork');
@@ -10,7 +11,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const stateDot = document.getElementById('playback-state-dot');
   const stateText = document.getElementById('playback-state-text');
 
-  // Controles de Playback
   const ctrlPlayPauseBtn = document.getElementById('ctrl-play-pause');
   const iconPlay = document.getElementById('icon-play');
   const iconPause = document.getElementById('icon-pause');
@@ -18,7 +18,6 @@ document.addEventListener('DOMContentLoaded', async () => {
   const ctrlPrevBtn = document.getElementById('ctrl-prev');
   const ctrlNextBtn = document.getElementById('ctrl-next');
 
-  // Dispositivos e Volume
   const deviceListEl = document.getElementById('device-list');
   const refreshDevicesBtn = document.getElementById('refresh-devices-btn');
   const volumeSlider = document.getElementById('volume-slider');
@@ -26,12 +25,25 @@ document.addEventListener('DOMContentLoaded', async () => {
   const targetDeviceLabel = document.getElementById('target-device-label');
   const volIcon = document.getElementById('vol-icon');
 
-  // Handoff e Status
   const handoffBtn = document.getElementById('handoff-btn');
   const handoffBtnText = document.getElementById('handoff-btn-text');
   const handoffSpinner = document.getElementById('handoff-spinner');
   const statusBox = document.getElementById('status-message');
   const closeBtn = document.getElementById('close-btn');
+
+  // Auto mode elements
+  const autoModeToggle = document.getElementById('auto-mode-toggle');
+  const autoModeBadge = document.getElementById('auto-mode-badge');
+
+  // Debug mode elements
+  const debugToggle = document.getElementById('debug-mode-toggle');
+  const debugPanel = document.getElementById('debug-panel');
+
+  // Telemetry elements
+  const telemetryListEl = document.getElementById('telemetry-log-list');
+  const clearLogsBtn = document.getElementById('clear-logs-btn');
+  const copyLogsBtn = document.getElementById('copy-logs-btn');
+  const exportLogsBtn = document.getElementById('export-logs-btn');
 
   const provider = new SpotifyProvider();
   let currentTrack = null;
@@ -40,13 +52,16 @@ document.addEventListener('DOMContentLoaded', async () => {
   let isCurrentlyPlaying = false;
   let volumeDebounceTimer = null;
   let pollTimer = null;
+  let telemetryTimer = null;
 
-  // 1. Carrega dados prévios do storage
+  // ───── 1. Load saved state ─────
   const storage = await chrome.storage.local.get([
     'currentTrack',
     'targetDeviceId',
     'targetDeviceName',
-    'lastVolume'
+    'lastVolume',
+    'autoModeEnabled',
+    'debugModeEnabled'
   ]);
 
   if (storage.currentTrack) {
@@ -64,24 +79,70 @@ document.addEventListener('DOMContentLoaded', async () => {
     volValText.textContent = `${storage.lastVolume}%`;
   }
 
-  // 2. Consulta aba ativa
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (activeTab && (activeTab.url?.includes('youtube.com') || activeTab.url?.includes('music.youtube.com'))) {
-    try {
+  // ───── 2. Auto Mode Toggle (INSIDE DOMContentLoaded — RC-4 FIX) ─────
+  if (autoModeToggle) {
+    autoModeToggle.checked = !!storage.autoModeEnabled;
+    updateAutoBadge(!!storage.autoModeEnabled);
+
+    autoModeToggle.addEventListener('change', async (e) => {
+      const enabled = e.target.checked;
+      await chrome.storage.local.set({ autoModeEnabled: enabled });
+      updateAutoBadge(enabled);
+      showStatus(
+        enabled ? '⚡ Modo Automático ATIVADO' : 'Modo Automático DESATIVADO',
+        enabled ? '#1db954' : '#888'
+      );
+    });
+  }
+
+  function updateAutoBadge(enabled) {
+    if (!autoModeBadge) return;
+    if (enabled) {
+      autoModeBadge.textContent = 'ON';
+      autoModeBadge.className = 'badge-auto-on';
+    } else {
+      autoModeBadge.textContent = 'OFF';
+      autoModeBadge.className = 'badge-auto-off';
+    }
+  }
+
+  // ───── 3. Debug Mode Toggle ─────
+  if (debugToggle) {
+    debugToggle.checked = !!storage.debugModeEnabled;
+    toggleDebugPanel(!!storage.debugModeEnabled);
+
+    debugToggle.addEventListener('change', async (e) => {
+      const enabled = e.target.checked;
+      await chrome.storage.local.set({ debugModeEnabled: enabled });
+      toggleDebugPanel(enabled);
+    });
+  }
+
+  function toggleDebugPanel(show) {
+    if (debugPanel) {
+      debugPanel.classList.toggle('hidden', !show);
+    }
+  }
+
+  // ───── 4. Query active tab ─────
+  try {
+    const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (activeTab && (activeTab.url?.includes('youtube.com') || activeTab.url?.includes('music.youtube.com'))) {
       chrome.tabs.sendMessage(activeTab.id, { type: 'GET_ACTIVE_TRACK' }, (res) => {
+        if (chrome.runtime.lastError) return; // tab may not have content script
         if (res?.payload) {
           updateTrackDisplay(res.payload);
         }
       });
-    } catch (e) {}
-  }
+    }
+  } catch (e) { /* tabs API may fail if no permission */ }
 
+  // ───── Display Helpers ─────
   function updateTrackDisplay(track) {
     currentTrack = track;
-    trackTitleEl.textContent = track.normalizedTitle || track.rawTitle;
-    trackArtistEl.textContent = track.normalizedArtist || track.rawArtist || 'Artista do canal';
+    trackTitleEl.textContent = track.title || track.normalizedTitle || track.rawTitle || '';
+    trackArtistEl.textContent = track.artist || track.normalizedArtist || track.rawArtist || 'Artista do canal';
 
-    // Exibe Capa se disponível
     if (track.artworkUrl) {
       trackArtwork.src = track.artworkUrl;
       trackArtwork.style.display = 'block';
@@ -123,7 +184,16 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // 3. Consulta em tempo real o estado de reprodução (Polling leve a cada 3s)
+  function showStatus(text, color) {
+    statusBox.textContent = text;
+    statusBox.style.color = color;
+    statusBox.classList.remove('hidden');
+    setTimeout(() => {
+      statusBox.classList.add('hidden');
+    }, 4500);
+  }
+
+  // ───── 5. Playback polling ─────
   async function checkPlaybackStatus() {
     try {
       const state = await provider.getPlaybackState();
@@ -139,8 +209,7 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
         if (state.device) {
-          selectedDeviceId = state.device.id;
-          selectedDeviceName = state.device.name;
+          // Update display only — don't overwrite user's saved preference
           targetDeviceLabel.textContent = state.device.name;
           if (state.device.volume_percent !== null) {
             volumeSlider.value = state.device.volume_percent;
@@ -148,12 +217,60 @@ document.addEventListener('DOMContentLoaded', async () => {
           }
         }
       }
-    } catch (e) {
-      // Falha silenciosa se offline
-    }
+    } catch (e) { /* silent on network failures */ }
   }
 
-  // 4. Botão Play / Pause Interativo com animação
+  // ───── 6. Debug panel updates ─────
+  async function updateDebugPanel() {
+    if (!debugPanel || debugPanel.classList.contains('hidden')) return;
+
+    const data = await chrome.storage.local.get([
+      'autoModeEnabled', 'currentTrack', 'lastAutoSync',
+      'targetDeviceId', 'targetDeviceName', 'handoffState',
+      'lastCorrelationId', 'lastHandoffError'
+    ]);
+
+    const debugContent = debugPanel.querySelector('.debug-content');
+    if (!debugContent) return;
+
+    const track = data.currentTrack;
+    const lastSync = data.lastAutoSync;
+
+    debugContent.innerHTML = `
+      <div class="debug-row"><span>AUTO:</span> <span class="${data.autoModeEnabled ? 'debug-on' : 'debug-off'}">${data.autoModeEnabled ? 'ON' : 'OFF'}</span></div>
+      <div class="debug-row"><span>Track:</span> <span>${track?.title || '—'}</span></div>
+      <div class="debug-row"><span>Artist:</span> <span>${track?.artist || '—'}</span></div>
+      <div class="debug-row"><span>Signature:</span> <span>${track?.signature || '—'}</span></div>
+      <div class="debug-row"><span>Previous:</span> <span>${lastSync?.signature || '—'}</span></div>
+      <div class="debug-row"><span>Target:</span> <span>${data.targetDeviceName || 'Tudo'}</span></div>
+      <div class="debug-row"><span>State:</span> <span>${data.handoffState || 'IDLE'}</span></div>
+      <div class="debug-row"><span>Correlation:</span> <span>${data.lastCorrelationId || '—'}</span></div>
+      ${data.lastHandoffError ? `<div class="debug-row debug-error"><span>Error:</span> <span>${data.lastHandoffError}</span></div>` : ''}
+    `;
+  }
+
+  // ───── 7. Telemetry UI ─────
+  async function updateTelemetryUI() {
+    if (!telemetryListEl) return;
+    const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
+    if (telemetryLogs.length === 0) {
+      telemetryListEl.innerHTML = '<div class="log-empty">Aguardando eventos do YouTube...</div>';
+      return;
+    }
+
+    telemetryListEl.innerHTML = telemetryLogs.slice(0, 15).map(l => {
+      const detail = l.data?.title || l.data?.trackName || l.data?.error || l.data?.decision || '';
+      const cid = l.correlationId ? `<span class="log-cid">${l.correlationId}</span>` : '';
+      return `
+        <div class="telemetry-item">
+          <div><span class="log-time">${l.time}</span>${cid}<span class="log-stage">${l.stage}</span></div>
+          <span class="log-msg">${detail}</span>
+        </div>
+      `;
+    }).join('');
+  }
+
+  // ───── 8. Playback Controls ─────
   ctrlPlayPauseBtn.addEventListener('click', async () => {
     iconPlay.classList.add('hidden');
     iconPause.classList.add('hidden');
@@ -173,7 +290,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  // Botões Próxima e Anterior
   ctrlNextBtn.addEventListener('click', async () => {
     try {
       await provider.nextTrack();
@@ -190,7 +306,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (e) {}
   });
 
-  // 5. Slider de Volume Mestre com Feedback em tempo real
+  // ───── 9. Volume ─────
   volumeSlider.addEventListener('input', (e) => {
     const val = parseInt(e.target.value, 10);
     volValText.textContent = `${val}%`;
@@ -205,12 +321,12 @@ document.addEventListener('DOMContentLoaded', async () => {
         await provider.setVolume(val, selectedDeviceId);
         await chrome.storage.local.set({ lastVolume: val });
       } catch (err) {
-        console.warn('Erro ao ajustar volume:', err);
+        console.warn('Volume error:', err);
       }
     }, 200);
   });
 
-  // 6. Lista os dispositivos disponíveis
+  // ───── 10. Device list ─────
   async function loadDevices() {
     deviceListEl.innerHTML = '<div class="loading-state">Buscando dispositivos...</div>';
 
@@ -233,7 +349,7 @@ document.addEventListener('DOMContentLoaded', async () => {
         const item = document.createElement('div');
         item.className = 'device-item';
 
-        const isCurrent = (selectedDeviceId && dev.id === selectedDeviceId) || 
+        const isCurrent = (selectedDeviceId && dev.id === selectedDeviceId) ||
                           (!selectedDeviceId && dev.name.toLowerCase().includes('tudo'));
 
         if (isCurrent) {
@@ -290,7 +406,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   }
 
-  // 7. Ação de Handoff com Spinner e Feedback de Animação
+  // ───── 11. Manual Handoff ─────
   handoffBtn.addEventListener('click', () => {
     if (!currentTrack) return;
 
@@ -302,6 +418,9 @@ document.addEventListener('DOMContentLoaded', async () => {
       type: 'TRIGGER_HANDOFF',
       autoPause: true
     }, (res) => {
+      if (chrome.runtime.lastError) {
+        showStatus('Erro: Extensão desconectada', '#ff5555');
+      }
       handoffBtn.disabled = false;
       handoffSpinner.classList.add('hidden');
       handoffBtnText.textContent = `▶ Pausar YouTube & Tocar em ${selectedDeviceName}`;
@@ -316,74 +435,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   });
 
-  function showStatus(text, color) {
-    statusBox.textContent = text;
-    statusBox.style.color = color;
-    statusBox.classList.remove('hidden');
-    setTimeout(() => {
-      statusBox.classList.add('hidden');
-    }, 4500);
-  }
-
-  refreshDevicesBtn.addEventListener('click', loadDevices);
-  if (closeBtn) closeBtn.addEventListener('click', () => window.close());
-
-  // Inicialização
-  await loadDevices();
-  await checkPlaybackStatus();
-  pollTimer = setInterval(checkPlaybackStatus, 3000);
-});
-
-  // Controle do Modo Automático
-  const autoModeToggle = document.getElementById('auto-mode-toggle');
-  const autoModeBadge = document.getElementById('auto-mode-badge');
-
-  chrome.storage.local.get('autoModeEnabled', (res) => {
-    const isAuto = !!res.autoModeEnabled;
-    autoModeToggle.checked = isAuto;
-    updateAutoBadge(isAuto);
-  });
-
-  autoModeToggle.addEventListener('change', async (e) => {
-    const enabled = e.target.checked;
-    await chrome.storage.local.set({ autoModeEnabled: enabled });
-    updateAutoBadge(enabled);
-    showStatus(enabled ? '⚡ Modo Automático ATIVADO' : 'Modo Automático DESATIVADO', enabled ? '#1db954' : '#888');
-  });
-
-  function updateAutoBadge(enabled) {
-    if (enabled) {
-      autoModeBadge.textContent = 'ON';
-      autoModeBadge.className = 'badge-auto-on';
-    } else {
-      autoModeBadge.textContent = 'OFF';
-      autoModeBadge.className = 'badge-auto-off';
-    }
-  }
-
-  // Renderiza logs de telemetria no painel do popup
-  const telemetryListEl = document.getElementById('telemetry-log-list');
-  const clearLogsBtn = document.getElementById('clear-logs-btn');
-
-  async function updateTelemetryUI() {
-    if (!telemetryListEl) return;
-    const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
-    if (telemetryLogs.length === 0) {
-      telemetryListEl.innerHTML = '<div class="log-empty">Aguardando eventos do YouTube...</div>';
-      return;
-    }
-
-    telemetryListEl.innerHTML = telemetryLogs.slice(0, 10).map(l => {
-      const detail = l.data?.trackTitle || l.data?.title || l.data?.trackName || l.data?.error || '';
-      return `
-        <div class="telemetry-item">
-          <div><span class="log-time">${l.time}</span><span class="log-stage">${l.stage}</span></div>
-          <span class="log-msg">${detail}</span>
-        </div>
-      `;
-    }).join('');
-  }
-
+  // ───── 12. Log buttons ─────
   if (clearLogsBtn) {
     clearLogsBtn.addEventListener('click', async () => {
       await chrome.storage.local.set({ telemetryLogs: [] });
@@ -391,6 +443,41 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // Atualiza telemetria a cada ciclo de polling
+  if (copyLogsBtn) {
+    copyLogsBtn.addEventListener('click', async () => {
+      const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
+      const text = telemetryLogs.map(l =>
+        `[${l.time}] [${l.correlationId || '-'}] ${l.stage} ${JSON.stringify(l.data)}`
+      ).join('\n');
+      await navigator.clipboard.writeText(text);
+      showStatus('📋 Logs copiados!', '#1db954');
+    });
+  }
+
+  if (exportLogsBtn) {
+    exportLogsBtn.addEventListener('click', async () => {
+      const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
+      const blob = new Blob([JSON.stringify(telemetryLogs, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sync-music-logs-${Date.now()}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    });
+  }
+
+  // ───── 13. Event listeners ─────
+  refreshDevicesBtn.addEventListener('click', loadDevices);
+  if (closeBtn) closeBtn.addEventListener('click', () => window.close());
+
+  // ───── 14. Initialize ─────
+  await loadDevices();
+  await checkPlaybackStatus();
+  pollTimer = setInterval(checkPlaybackStatus, 3000);
   updateTelemetryUI();
-  setInterval(updateTelemetryUI, 2000);
+  telemetryTimer = setInterval(() => {
+    updateTelemetryUI();
+    updateDebugPanel();
+  }, 2000);
+});

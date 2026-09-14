@@ -1,18 +1,7 @@
 // Mock das APIs do Chrome para testes autônomos em Node.js
-const fs = require('fs');
-const path = require('path');
+// NO hardcoded tokens — tests must set tokens explicitly if needed
 
-const storageFile = path.resolve('/home/edu/.gemini/antigravity/scratch/sync-music-extension/shared/default-token.json');
 let memoryStorage = {};
-
-if (fs.existsSync(storageFile)) {
-  const seed = JSON.parse(fs.readFileSync(storageFile, 'utf8'));
-  memoryStorage = {
-    spotify_access_token: seed.access_token,
-    spotify_refresh_token: seed.refresh_token,
-    spotify_token_expires_at: Date.now() + 3600000
-  };
-}
 
 globalThis.chrome = {
   storage: {
@@ -24,14 +13,32 @@ globalThis.chrome = {
           keys.forEach(k => res[k] = memoryStorage[k]);
           return res;
         }
-        return memoryStorage;
+        return { ...memoryStorage };
       },
       set: async (obj) => {
         Object.assign(memoryStorage, obj);
+      },
+      remove: async (keys) => {
+        const keyArr = Array.isArray(keys) ? keys : [keys];
+        keyArr.forEach(k => delete memoryStorage[k]);
       }
     }
   },
   runtime: {
-    getURL: (file) => path.resolve('/home/edu/.gemini/antigravity/scratch/sync-music-extension', file)
+    getURL: (file) => `chrome-extension://fake-id/${file}`,
+    lastError: null
+  },
+  action: {
+    setBadgeText: async () => {},
+    setBadgeBackgroundColor: async () => {}
+  },
+  tabs: {
+    query: async () => [],
+    sendMessage: async () => null
   }
+};
+
+// Helper to reset storage between tests
+globalThis.resetMockStorage = (initial = {}) => {
+  memoryStorage = { ...initial };
 };

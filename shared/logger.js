@@ -1,27 +1,33 @@
-// logger.js: Sistema de Telemetria e Logs em tempo real persistente no chrome.storage
-const MAX_LOGS = 80;
+// logger.js: Telemetry system with correlationId tracking and log rotation
+const MAX_LOG_ENTRIES = 1000;
 
-// Gravações em série: get→unshift→set concorrentes perdiam eventos
-let writeQueue = Promise.resolve();
+export async function logTelemetry(stage, data = {}, correlationId = null) {
+  const now = new Date();
+  const timestamp = now.toISOString();
+  const timeShort = timestamp.split('T')[1].slice(0, 12); // HH:MM:SS.mmm
 
-export function logTelemetry(stage, data = {}) {
-  const time = new Date().toLocaleTimeString('pt-BR', { hour12: false });
   const logEntry = {
-    time,
-    at: Date.now(),
+    timestamp,
+    time: timeShort,
     stage,
+    correlationId,
     data,
-    id: Math.random().toString(36).substring(2, 7)
+    id: Math.random().toString(36).substring(2, 8)
   };
 
-  console.log(`[TELEMETRIA ${time}] [${stage}]`, data);
+  console.log(`[SYNC ${timeShort}] [${correlationId || '-'}] ${stage}`, data);
 
-  writeQueue = writeQueue
-    .then(async () => {
-      const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
-      telemetryLogs.unshift(logEntry);
-      await chrome.storage.local.set({ telemetryLogs: telemetryLogs.slice(0, MAX_LOGS) });
-    })
-    .catch(() => {});
-  return writeQueue;
+  try {
+    const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
+    telemetryLogs.unshift(logEntry);
+
+    // Log rotation: keep only the most recent entries
+    while (telemetryLogs.length > MAX_LOG_ENTRIES) {
+      telemetryLogs.pop();
+    }
+
+    await chrome.storage.local.set({ telemetryLogs });
+  } catch (e) {
+    // Storage may be unavailable during SW shutdown
+  }
 }

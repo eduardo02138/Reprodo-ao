@@ -1,13 +1,30 @@
-// Content Script: Detecção contínua por MediaSession + SPA Listeners + DOM Fallback e Controle de Playback
+// Content Script: YouTube/YouTube Music track detection with SPA navigation support
+// Runs in the page context (not a module — no import/export)
 (function() {
-  let lastReportedTitle = '';
-  let isFirstLoad = true;
-  let navigationDebounceTimer = null;
+  // ───── State ─────
+  let lastReportedSignature = '';
+  let lastReportedVideoId = '';
+  let metadataStabilizeTimer = null;
+  let correlationCounter = 0;
 
+  // Unique per page load — enables F5 re-detection (RC-2 FIX)
+  const pageInstanceId = `page_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+
+  // ───── Helpers ─────
   function getMediaElement() {
     return document.querySelector('video');
   }
 
+  function getVideoId() {
+    const params = new URLSearchParams(window.location.search);
+    return params.get('v') || '';
+  }
+
+  function generateCorrelationId() {
+    return `cs_${String(++correlationCounter).padStart(4, '0')}_${Date.now().toString(36)}`;
+  }
+
+  // ───── Video Controls ─────
   function pauseAndMuteCurrentVideo() {
     const video = getMediaElement();
     if (video) {
@@ -18,6 +35,17 @@
     return false;
   }
 
+  function restoreVideo() {
+    const video = getMediaElement();
+    if (video) {
+      video.muted = false;
+      video.play().catch(() => {}); // may fail if user hasn't interacted
+      return true;
+    }
+    return false;
+  }
+
+  // ───── Metadata Extraction ─────
   function extractMetadata() {
     const isYTM = window.location.hostname === 'music.youtube.com';
     let title = null;
@@ -26,14 +54,13 @@
     let artworkUrl = null;
     let metadataSource = 'fallback';
 
-    // 1. Prioridade 1: MediaSession API (Alta Fidelidade)
+    // Priority 1: MediaSession API (highest fidelity)
     if (navigator.mediaSession && navigator.mediaSession.metadata) {
       const meta = navigator.mediaSession.metadata;
       if (meta.title && meta.title.trim()) {
         title = meta.title.trim();
         artist = meta.artist ? meta.artist.trim() : null;
         album = meta.album ? meta.album.trim() : null;
-
         if (meta.artwork && meta.artwork.length > 0) {
           artworkUrl = meta.artwork[meta.artwork.length - 1].src || null;
         }
@@ -41,7 +68,7 @@
       }
     }
 
-    // 2. Prioridade 2: Adaptador DOM
+    // Priority 2: DOM selectors
     if (!title) {
       if (isYTM) {
         const titleEl = document.querySelector('ytmusic-player-bar .title');
@@ -66,7 +93,7 @@
       }
     }
 
-    // 3. Prioridade 3: Fallback de título
+    // Priority 3: document.title fallback
     if (!title) {
       title = document.title.replace(/ - YouTube( Music)?$/i, '').trim();
       metadataSource = 'document-title';
@@ -80,6 +107,7 @@
       artworkUrl,
       metadataSource,
       source: isYTM ? 'youtube-music' : 'youtube',
+      videoId: getVideoId(),
       playback: {
         playing: video ? !video.paused : false,
         currentTime: video ? video.currentTime : 0,
@@ -88,53 +116,165 @@
     };
   }
 
-  function monitorTrack(forceCheck = false) {
+  // ───── Track Detection with Stabilization ─────
+  // Waits for metadata to stabilize after navigation before reporting
+  function scheduleMetadataCheck(reason) {
+    // Cancel any pending check — we want the latest state
+    clearTimeout(metadataStabilizeTimer);
+
+    // Short debounce: wait for MediaSession to catch up with the URL change
+    metadataStabilizeTimer = setTimeout(() => {
+      checkAndReportTrack(reason);
+    }, 400);
+  }
+
+  function checkAndReportTrack(reason) {
     const raw = extractMetadata();
     if (!raw.title) return;
 
-    // Normaliza
-    const normalized = typeof normalizeTrackInfo === 'function' 
+    // Normalize
+    const normalized = typeof normalizeTrackInfo === 'function'
       ? normalizeTrackInfo(raw.title, raw.artist)
       : { title: raw.title, artist: raw.artist };
 
     const cleanTitle = normalized.title || raw.title;
-    const cleanArtist = normalized.artist || raw.artist;
+    const cleanArtist = normalized.artist || raw.artist || '';
+    const signature = `${cleanTitle}|${cleanArtist}`.toLowerCase();
+    const videoId = raw.videoId;
 
-    if (!forceCheck && cleanTitle === lastReportedTitle) return;
-    lastReportedTitle = cleanTitle;
+    // Skip if same track AND same video (prevents duplicate reports)
+    // But allow if videoId changed (new video) or if this is a new page instance
+    if (signature === lastReportedSignature && videoId === lastReportedVideoId) {
+      return;
+    }
 
-    const isReload = isFirstLoad;
-    isFirstLoad = false;
+    // Hypothesis B guard: if URL changed but MediaSession still shows old track,
+    // the metadata hasn't stabilized yet. Check videoId consistency.
+    if (videoId && videoId !== lastReportedVideoId && raw.metadataSource === 'media-session') {
+      // Video changed — verify MediaSession isn't stale by comparing with DOM
+      const domTitle = getDOMTitle();
+      if (domTitle && !titleMatchesLoosely(cleanTitle, domTitle)) {
+        // MediaSession is stale — retry after a bit
+        console.log('[SyncMusic] MediaSession stale after navigation, retrying...', {
+          mediaSessionTitle: cleanTitle, domTitle, videoId
+        });
+        setTimeout(() => checkAndReportTrack(reason + '-retry'), 800);
+        return;
+      }
+    }
 
-    // Contrato Canônico Universal de Dados
+    lastReportedSignature = signature;
+    lastReportedVideoId = videoId;
+    const correlationId = generateCorrelationId();
+
+    // Send to service worker with canonical field names (RC-3 FIX)
     chrome.runtime.sendMessage({
       type: 'NOW_PLAYING_DETECTED',
       payload: {
+        // Primary fields (what the SW expects)
         title: cleanTitle,
         artist: cleanArtist,
+        signature,
+        // Additional metadata
         rawTitle: raw.title,
         rawArtist: raw.artist,
         album: raw.album,
         artworkUrl: raw.artworkUrl,
-        normalizedTitle: cleanTitle,
-        normalizedArtist: cleanArtist,
         metadataSource: raw.metadataSource,
         source: raw.source,
-        isNavigationReload: isReload,
-        timestamp: Date.now()
+        videoId,
+        pageInstanceId,
+        correlationId,
+        reason
+      }
+    }).catch(() => {
+      // Extension context may be invalidated after reload
+    });
+  }
+
+  // Helper: get title from DOM (bypassing MediaSession)
+  function getDOMTitle() {
+    const isYTM = window.location.hostname === 'music.youtube.com';
+    if (isYTM) {
+      const el = document.querySelector('ytmusic-player-bar .title');
+      return el?.textContent?.trim() || null;
+    }
+    const el = document.querySelector('h1.ytd-watch-metadata yt-formatted-string, #title h1 yt-formatted-string');
+    return el?.textContent?.trim() || null;
+  }
+
+  // Helper: loose title comparison to detect stale MediaSession
+  function titleMatchesLoosely(a, b) {
+    if (!a || !b) return false;
+    const na = a.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const nb = b.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return na.includes(nb) || nb.includes(na);
+  }
+
+  // ───── YouTube SPA Navigation Detection (RC-1 FIX) ─────
+
+  // 1. YouTube's custom navigation events
+  document.addEventListener('yt-navigate-finish', () => {
+    scheduleMetadataCheck('yt-navigate-finish');
+  });
+
+  // YouTube Music uses similar but different event
+  document.addEventListener('yt-page-data-updated', () => {
+    scheduleMetadataCheck('yt-page-data-updated');
+  });
+
+  // 2. History API interception (SPA pushState/replaceState)
+  const originalPushState = history.pushState;
+  const originalReplaceState = history.replaceState;
+
+  history.pushState = function(...args) {
+    originalPushState.apply(this, args);
+    scheduleMetadataCheck('pushState');
+  };
+
+  history.replaceState = function(...args) {
+    originalReplaceState.apply(this, args);
+    scheduleMetadataCheck('replaceState');
+  };
+
+  window.addEventListener('popstate', () => {
+    scheduleMetadataCheck('popstate');
+  });
+
+  // 3. Video element events (most reliable for actual track change)
+  function attachVideoListeners() {
+    const video = getMediaElement();
+    if (!video || video.__syncMusicListenersAttached) return;
+    video.__syncMusicListenersAttached = true;
+
+    video.addEventListener('loadedmetadata', () => {
+      scheduleMetadataCheck('video-loadedmetadata');
+    });
+
+    video.addEventListener('playing', () => {
+      // Only check if this looks like a new track (not a resume)
+      if (video.currentTime < 2) {
+        scheduleMetadataCheck('video-playing-start');
       }
     });
   }
 
-  // Agenda monitoramento após eventos de navegação SPA do YouTube com debounce
-  function scheduleTrackCheck(delayMs = 400) {
-    clearTimeout(navigationDebounceTimer);
-    navigationDebounceTimer = setTimeout(() => {
-      monitorTrack(true);
-    }, delayMs);
-  }
+  // 4. MutationObserver (catches DOM changes not covered above)
+  const observer = new MutationObserver(() => {
+    attachVideoListeners();
+    injectHandoffButton();
+    // Don't call scheduleMetadataCheck on every mutation — too noisy
+    // The specific event listeners above handle track changes
+  });
+  observer.observe(document.body, { childList: true, subtree: true });
 
-  // Injeta botão nativo de Handoff
+  // 5. Periodic fallback (safety net, longer interval since we have event-driven detection)
+  setInterval(() => {
+    attachVideoListeners();
+    checkAndReportTrack('interval');
+  }, 3000);
+
+  // ───── Handoff Button Injection ─────
   function injectHandoffButton() {
     if (document.getElementById('sync-handoff-btn')) return;
 
@@ -171,60 +311,40 @@
     controls.prepend(btn);
   }
 
-  // Escuta comandos remotos
+  // ───── Remote Command Handler ─────
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'PAUSE_AND_MUTE_YOUTUBE' || msg.type === 'PAUSE_YOUTUBE') {
       const paused = pauseAndMuteCurrentVideo();
       sendResponse({ paused });
+    } else if (msg.type === 'RESTORE_YOUTUBE') {
+      const restored = restoreVideo();
+      sendResponse({ restored });
     } else if (msg.type === 'GET_ACTIVE_TRACK') {
       const raw = extractMetadata();
-      const normalized = typeof normalizeTrackInfo === 'function' 
+      const normalized = typeof normalizeTrackInfo === 'function'
         ? normalizeTrackInfo(raw.title, raw.artist)
         : { title: raw.title, artist: raw.artist };
 
-      const cleanTitle = normalized.title || raw.title;
-      const cleanArtist = normalized.artist || raw.artist;
-
       sendResponse({
         payload: {
-          title: cleanTitle,
-          artist: cleanArtist,
+          title: normalized.title || raw.title,
+          artist: normalized.artist || raw.artist,
           rawTitle: raw.title,
           rawArtist: raw.artist,
           album: raw.album,
           artworkUrl: raw.artworkUrl,
-          normalizedTitle: cleanTitle,
-          normalizedArtist: cleanArtist,
           metadataSource: raw.metadataSource,
           source: raw.source,
-          timestamp: Date.now()
+          videoId: raw.videoId,
+          pageInstanceId,
+          signature: `${normalized.title || raw.title}|${normalized.artist || raw.artist || ''}`.toLowerCase()
         }
       });
     }
+    return false; // synchronous response
   });
 
-  // Eventos Nativos de Navegação e Transição SPA do YouTube
-  window.addEventListener('yt-navigate-finish', () => scheduleTrackCheck(400));
-  window.addEventListener('yt-page-data-updated', () => scheduleTrackCheck(400));
-
-  // Escuta carregamento do elemento de vídeo
-  function attachVideoListeners() {
-    const video = getMediaElement();
-    if (video && !video.dataset.syncBound) {
-      video.dataset.syncBound = 'true';
-      video.addEventListener('loadeddata', () => scheduleTrackCheck(300));
-      video.addEventListener('play', () => scheduleTrackCheck(300));
-    }
-  }
-
-  const observer = new MutationObserver(() => {
-    monitorTrack(false);
-    injectHandoffButton();
-    attachVideoListeners();
-  });
-
-  observer.observe(document.body, { childList: true, subtree: true });
+  // ───── Initial Detection ─────
   attachVideoListeners();
-  setInterval(() => monitorTrack(false), 1500);
-  setTimeout(() => monitorTrack(true), 500);
+  scheduleMetadataCheck('initial-load');
 })();

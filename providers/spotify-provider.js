@@ -11,7 +11,7 @@ export class SpotifyProvider {
     return await this.client.getAccessToken();
   }
 
-  // G8: Descoberta resiliente respeitando preferredDeviceName ("Tudo")
+  // Lista dispositivos disponíveis
   async getDevices() {
     const { res } = await this.client.request('/me/player/devices');
     if (!res.ok) {
@@ -21,73 +21,123 @@ export class SpotifyProvider {
     return data.devices || [];
   }
 
-  // Resolve o dispositivo alvo contra a lista atual: o device_id do Spotify só é persistente "até certo ponto"
-  async resolveTargetDevice({ preferredId = null, preferredName = null, fallbackName = 'Tudo' } = {}) {
+  // RC-5 FIX: Accepts object {preferredId, preferredName, fallbackName}
+  // RC-13 FIX: No devices[0] fallback — returns null if preferred not found
+  async resolveTargetDevice({ preferredId, preferredName, fallbackName } = {}) {
     const devices = await this.getDevices();
     if (devices.length === 0) return null;
 
-    const lower = (s) => (s || '').toLowerCase();
-    const exactName = (name) => name && devices.find(d => lower(d.name) === lower(name));
-    const partialName = (name) => name && devices.find(d => lower(d.name).includes(lower(name)));
-    const pick = (device, matchedBy) => (device ? { device, matchedBy } : null);
+    // Filter out restricted devices
+    const available = devices.filter(d => !d.is_restricted);
+    if (available.length === 0) return null;
 
-    return pick(preferredId && devices.find(d => d.id === preferredId), 'id')
-      || pick(exactName(preferredName), 'name')
-      || pick(exactName(fallbackName) || partialName(fallbackName), 'fallback-name')
-      || pick(devices.find(d => d.is_active), 'active')
-      || pick(devices[0], 'first-available');
-  }
-
-  // Busca faixa no catálogo: qualificada → ampla → só título
-  async searchTrack(title, artist) {
-    const queries = [
-      artist ? `track:"${title}" artist:"${artist}"` : `track:"${title}"`,
-      artist ? `${title} ${artist}` : title,
-      title
-    ];
-
-    for (const query of [...new Set(queries)]) {
-      const { res } = await this.client.request(`/search?q=${encodeURIComponent(query)}&type=track&limit=5`);
-      if (res.status === 400) continue;
-      if (!res.ok) throw new Error(`Erro na busca do Spotify: ${res.status}`);
-      const data = await res.json();
-      if (data.tracks?.items?.length > 0) return data.tracks.items;
+    // 1. Match by saved ID (validate it still exists and is accessible)
+    if (preferredId) {
+      const byId = available.find(d => d.id === preferredId);
+      if (byId) {
+        return { device: byId, matchedBy: 'id' };
+      }
     }
-    return [];
+
+    // 2. Match by preferred name
+    const nameToFind = preferredName || fallbackName || 'Tudo';
+    const byName = available.find(d =>
+      d.name.toLowerCase() === nameToFind.toLowerCase()
+    );
+    if (byName) {
+      return { device: byName, matchedBy: 'name' };
+    }
+
+    // 3. Looser name match (contains)
+    const byPartialName = available.find(d =>
+      d.name.toLowerCase().includes(nameToFind.toLowerCase())
+    );
+    if (byPartialName) {
+      return { device: byPartialName, matchedBy: 'partial-name' };
+    }
+
+    // 4. Try fallback name if different from preferred
+    if (fallbackName && fallbackName !== nameToFind) {
+      const byFallback = available.find(d =>
+        d.name.toLowerCase().includes(fallbackName.toLowerCase())
+      );
+      if (byFallback) {
+        return { device: byFallback, matchedBy: 'fallback-name' };
+      }
+    }
+
+    // 5. NO automatic fallback to devices[0] — return null
+    // The caller must handle DEVICE_UNAVAILABLE
+    return null;
   }
 
-  async describeResult(res) {
-    if (res.ok) return { ok: true, status: res.status };
-    let error = '';
-    try {
-      const body = await res.json();
-      error = body.error?.message || body.error?.reason || JSON.stringify(body);
-    } catch (e) {}
-    return { ok: false, status: res.status, error };
+  // Busca faixa no catálogo com busca qualificada e fallback amplo
+  async searchTrack(title, artist) {
+    let query = `track:"${title}"`;
+    if (artist) query += ` artist:"${artist}"`;
+
+    let { res } = await this.client.request(`/search?q=${encodeURIComponent(query)}&type=track&limit=5`);
+    let data = await res.json();
+
+    if (data.tracks?.items?.length > 0) {
+      return data.tracks.items;
+    }
+
+    // Fallback: broader search without field qualifiers
+    const fallbackQuery = artist ? `${title} ${artist}` : title;
+    const fallbackRes = await this.client.request(`/search?q=${encodeURIComponent(fallbackQuery)}&type=track&limit=5`);
+    data = await fallbackRes.res.json();
+    return data.tracks?.items || [];
   }
 
-  // Dispara reprodução em dispositivo
+  // RC-6 FIX: Returns {ok, status, error} instead of boolean
   async playTrackOnDevice(deviceId, trackUri) {
     const endpoint = deviceId
       ? `/me/player/play?device_id=${encodeURIComponent(deviceId)}`
       : '/me/player/play';
 
-    const { res } = await this.client.request(endpoint, {
-      method: 'PUT',
-      body: JSON.stringify({ uris: [trackUri] })
-    });
-    return this.describeResult(res);
+    try {
+      const { res } = await this.client.request(endpoint, {
+        method: 'PUT',
+        body: JSON.stringify({ uris: [trackUri] })
+      });
+
+      if (res.status === 204 || res.ok) {
+        return { ok: true, status: res.status };
+      }
+
+      let error = '';
+      try { error = await res.text(); } catch (e) {}
+      return { ok: false, status: res.status, error };
+    } catch (err) {
+      return { ok: false, status: 0, error: err.message };
+    }
   }
 
-  async transferPlayback(deviceId, play = false) {
-    const { res } = await this.client.request('/me/player', {
-      method: 'PUT',
-      body: JSON.stringify({ device_ids: [deviceId], play })
-    });
-    return this.describeResult(res);
+  // Transfer playback to a device (needed when device is inactive)
+  async transferPlayback(deviceId, autoPlay = false) {
+    try {
+      const { res } = await this.client.request('/me/player', {
+        method: 'PUT',
+        body: JSON.stringify({
+          device_ids: [deviceId],
+          play: autoPlay
+        })
+      });
+
+      if (res.status === 204 || res.ok) {
+        return { ok: true, status: res.status };
+      }
+
+      let error = '';
+      try { error = await res.text(); } catch (e) {}
+      return { ok: false, status: res.status, error };
+    } catch (err) {
+      return { ok: false, status: 0, error: err.message };
+    }
   }
 
-  // G10: Ajuste de volume com abort tag para evitar race condition
+  // Volume control with abort tag for race condition prevention
   async setVolume(percent, deviceId) {
     let endpoint = `/me/player/volume?volume_percent=${encodeURIComponent(percent)}`;
     if (deviceId) endpoint += `&device_id=${encodeURIComponent(deviceId)}`;

@@ -99,11 +99,38 @@
       </button>
     </div>
 
+    <!-- Debug Mode Toggle -->
+    <section class="auto-mode-card">
+      <div class="auto-mode-info">
+        <div class="auto-mode-title-row">
+          <span class="auto-mode-icon">🐞</span>
+          <span class="auto-mode-title">Debug Mode</span>
+        </div>
+        <p class="auto-mode-desc">Exibir estado interno e detalhes do handoff</p>
+      </div>
+      <label class="switch">
+        <input type="checkbox" id="debug-mode-toggle">
+        <span class="slider round"></span>
+      </label>
+    </section>
+
+    <!-- Debug State Panel (hidden by default) -->
+    <section id="debug-panel" class="telemetry-card hidden">
+      <div class="telemetry-header">
+        <span>🔍 Estado Interno</span>
+      </div>
+      <div class="debug-content" style="font-family:monospace;font-size:10px;color:#bbb;"></div>
+    </section>
+
     <!-- Painel de Telemetria e Logs em Tempo Real -->
     <section class="telemetry-card">
       <div class="telemetry-header">
-        <span>📡 Telemetria do Modo Automático</span>
-        <button id="clear-logs-btn" class="btn-sm-text">Limpar</button>
+        <span>📡 Telemetria</span>
+        <div style="display:flex;gap:4px;">
+          <button id="copy-logs-btn" class="btn-sm-text" title="Copiar logs">📋</button>
+          <button id="export-logs-btn" class="btn-sm-text" title="Exportar JSON">💾</button>
+          <button id="clear-logs-btn" class="btn-sm-text">Limpar</button>
+        </div>
       </div>
       <div id="telemetry-log-list" class="telemetry-list">
         <div class="log-empty">Nenhum evento registrado ainda.</div>

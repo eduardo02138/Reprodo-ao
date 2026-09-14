@@ -618,3 +618,19 @@ input:checked + .slider:before {
 .log-time { color: #666; margin-right: 6px; }
 .log-stage { color: #1db954; font-weight: 600; }
 .log-msg { color: #bbb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 170px; }
+.log-cid { color: #8b5cf6; font-size: 8px; margin-right: 4px; }
+.log-empty { color: #555; font-size: 10px; text-align: center; padding: 8px; }
+
+/* Debug panel */
+.debug-row {
+  display: flex;
+  justify-content: space-between;
+  padding: 2px 4px;
+  border-bottom: 1px solid #222;
+}
+.debug-row span:first-child { color: #888; }
+.debug-row span:last-child { color: #ccc; }
+.debug-on { color: #1db954 !important; font-weight: 700; }
+.debug-off { color: #888 !important; }
+.debug-error { border-left: 2px solid #ff5555; }
+.debug-error span:last-child { color: #ff5555; }

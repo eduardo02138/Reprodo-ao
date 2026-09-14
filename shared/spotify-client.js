@@ -1,26 +1,7 @@
-// spotify-client.js: Cliente centralizado com resiliência, auto-refresh (G6),
-// tratamento estrito de 429/Retry-After/Quota (G7), abort controllers e sequence tracking (G10)
+// spotify-client.js: Centralized Spotify API client with auto-refresh,
+// rate limit handling, abort controllers, and proper error categorization
 
 const CLIENT_ID = '24cb626331b849ecafb746f6b4487f80';
-const TOKEN_KEYS = ['spotify_access_token', 'spotify_refresh_token', 'spotify_token_expires_at'];
-const REFRESH_MARGIN_MS = 60000;
-
-const isExpiring = (tokens) =>
-  !tokens.spotify_token_expires_at || Date.now() > tokens.spotify_token_expires_at - REFRESH_MARGIN_MS;
-
-let localRefreshChain = Promise.resolve();
-
-// Popup e service worker têm clientes separados. O Spotify pode rotacionar o refresh token
-// (o antigo deixa de valer), então dois refresh simultâneos derrubariam a sessão.
-// O Web Lock serializa o refresh entre todos os contextos da extensão.
-function withRefreshLock(fn) {
-  if (globalThis.navigator?.locks) {
-    return navigator.locks.request('spotify-token-refresh', fn);
-  }
-  const run = localRefreshChain.then(fn);
-  localRefreshChain = run.catch(() => {});
-  return run;
-}
 
 export class SpotifyClient {
   constructor() {
@@ -30,52 +11,48 @@ export class SpotifyClient {
     this.activeAbortControllers = new Map();
   }
 
-  async loadTokens() {
-    const tokens = await chrome.storage.local.get(TOKEN_KEYS);
-    if (tokens.spotify_access_token) return tokens;
+  async getAccessToken() {
+    let { spotify_access_token, spotify_refresh_token, spotify_token_expires_at } =
+      await chrome.storage.local.get([
+        'spotify_access_token', 'spotify_refresh_token', 'spotify_token_expires_at'
+      ]);
 
-    // Sem token salvo: usa o seed empacotado. Ele pode estar vencido, então força refresh (expires_at = 0).
-    try {
-      const res = await fetch(chrome.runtime.getURL('shared/default-token.json'));
-      if (res.ok) {
-        const seed = await res.json();
-        const seeded = {
-          spotify_access_token: seed.access_token,
-          spotify_refresh_token: seed.refresh_token,
-          spotify_token_expires_at: 0
-        };
-        await chrome.storage.local.set(seeded);
-        return seeded;
-      }
-    } catch (e) {}
-    return tokens;
-  }
-
-  // staleToken: token que acabou de receber 401 e precisa ser trocado mesmo sem ter "expirado"
-  async getAccessToken({ staleToken = null } = {}) {
-    const tokens = await this.loadTokens();
-    const needsRefresh = (t) => isExpiring(t) || (!!staleToken && t.spotify_access_token === staleToken);
-
-    if (!tokens.spotify_refresh_token || !needsRefresh(tokens)) {
-      return tokens.spotify_access_token;
+    // No token at all → user must authenticate
+    if (!spotify_access_token && !spotify_refresh_token) {
+      await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
+      throw new Error('AUTH_REQUIRED: Nenhum token encontrado. Faça login no Spotify.');
     }
 
-    return withRefreshLock(async () => {
-      // Outro contexto pode ter renovado enquanto esperávamos o lock
-      const current = await chrome.storage.local.get(TOKEN_KEYS);
-      if (!needsRefresh(current)) return current.spotify_access_token;
-
+    // Auto-refresh if token expires within 60 seconds
+    const isExpiring = !spotify_token_expires_at || Date.now() > (spotify_token_expires_at - 60000);
+    if (isExpiring && spotify_refresh_token) {
       try {
-        const refreshed = await this.refreshToken(current.spotify_refresh_token || tokens.spotify_refresh_token);
-        return refreshed.access_token;
+        const refreshed = await this.refreshToken(spotify_refresh_token);
+        if (refreshed) {
+          spotify_access_token = refreshed.access_token;
+        }
       } catch (err) {
         if (err.message.includes('invalid_grant')) {
+          // Refresh token revoked or expired (6 months) — need full re-auth
           await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
-          throw new Error('AUTH_REQUIRED: Sessão do Spotify expirada (6 meses). Faça login novamente.');
+          throw new Error('AUTH_REQUIRED: Sessão do Spotify expirada. Faça login novamente.');
         }
-        return current.spotify_access_token || tokens.spotify_access_token;
+
+        // Network error or server error during refresh — temporary failure
+        // Do NOT return the expired token
+        if (!spotify_access_token || (spotify_token_expires_at && Date.now() > spotify_token_expires_at)) {
+          throw new Error(`TEMPORARY_AUTH_FAILURE: ${err.message}`);
+        }
+        // Token not yet expired, use it despite refresh failure
       }
-    });
+    }
+
+    if (!spotify_access_token) {
+      await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
+      throw new Error('AUTH_REQUIRED');
+    }
+
+    return spotify_access_token;
   }
 
   async refreshToken(refreshToken) {
@@ -105,31 +82,15 @@ export class SpotifyClient {
       spotify_access_token: data.access_token,
       spotify_refresh_token: data.refresh_token || refreshToken,
       spotify_token_expires_at: expiresAt,
-      engineState: 'READY'
+      engineState: 'ACTIVE'
     });
 
     return data;
   }
 
-  async send(url, options, token) {
-    const headers = {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(options.headers || {})
-    };
-    try {
-      return await fetch(url, { ...options, headers });
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        throw new Error('REQUEST_SUPERSEDED: Operação mais recente enviada.');
-      }
-      throw err;
-    }
-  }
-
-  // G7 & G10: Método centralizado de requisições
+  // Centralized request method with rate limit, abort, and auth handling
   async request(endpoint, options = {}, cancelTag = null) {
-    // 1. Verifica estado de Quota / Rate Limit
+    // 1. Check quota/rate limit state
     if (this.quotaExceeded) {
       throw new Error('QUOTA_EXCEEDED: Cota de API do Spotify excedida no modo desenvolvedor.');
     }
@@ -139,7 +100,7 @@ export class SpotifyClient {
       throw new Error(`RATE_LIMITED: Aguarde ${waitSec}s antes de enviar novos comandos.`);
     }
 
-    // 2. G10: Cancelamento de requisições anteriores com a mesma tag (ex: volume rápido)
+    // 2. Cancel previous request with same tag (e.g., rapid volume changes)
     if (cancelTag) {
       if (this.activeAbortControllers.has(cancelTag)) {
         this.activeAbortControllers.get(cancelTag).abort();
@@ -149,31 +110,33 @@ export class SpotifyClient {
       options.signal = controller.signal;
     }
 
+    const token = await this.getAccessToken();
+    if (!token) throw new Error('AUTH_REQUIRED');
+
+    const headers = {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    };
+
     const currentSeq = ++this.requestSequence;
     const url = endpoint.startsWith('http') ? endpoint : `https://api.spotify.com/v1${endpoint}`;
 
     let res;
     try {
-      let token = await this.getAccessToken();
-      if (!token) throw new Error('AUTH_REQUIRED');
-
-      res = await this.send(url, options, token);
-
-      // Token recusado antes do vencimento previsto: renova uma vez e repete
-      if (res.status === 401) {
-        const renewed = await this.getAccessToken({ staleToken: token });
-        if (renewed && renewed !== token) {
-          token = renewed;
-          res = await this.send(url, options, token);
-        }
+      res = await fetch(url, { ...options, headers });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error('REQUEST_SUPERSEDED: Operação mais recente enviada.');
       }
+      throw err;
     } finally {
       if (cancelTag && this.activeAbortControllers.get(cancelTag)?.signal === options.signal) {
         this.activeAbortControllers.delete(cancelTag);
       }
     }
 
-    // 3. G7: Tratamento dos códigos de status
+    // 3. Handle response status codes
     if (res.status === 429) {
       const retryAfter = parseInt(res.headers.get('Retry-After') || '5', 10);
       this.rateLimitResetTime = Date.now() + (retryAfter * 1000);

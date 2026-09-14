@@ -1,0 +1,5 @@
+node_modules/
+*.token.json
+default-token.json
+.env
+*.log
