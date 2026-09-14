@@ -2,6 +2,25 @@
 // tratamento estrito de 429/Retry-After/Quota (G7), abort controllers e sequence tracking (G10)
 
 const CLIENT_ID = '24cb626331b849ecafb746f6b4487f80';
+const TOKEN_KEYS = ['spotify_access_token', 'spotify_refresh_token', 'spotify_token_expires_at'];
+const REFRESH_MARGIN_MS = 60000;
+
+const isExpiring = (tokens) =>
+  !tokens.spotify_token_expires_at || Date.now() > tokens.spotify_token_expires_at - REFRESH_MARGIN_MS;
+
+let localRefreshChain = Promise.resolve();
+
+// Popup e service worker têm clientes separados. O Spotify pode rotacionar o refresh token
+// (o antigo deixa de valer), então dois refresh simultâneos derrubariam a sessão.
+// O Web Lock serializa o refresh entre todos os contextos da extensão.
+function withRefreshLock(fn) {
+  if (globalThis.navigator?.locks) {
+    return navigator.locks.request('spotify-token-refresh', fn);
+  }
+  const run = localRefreshChain.then(fn);
+  localRefreshChain = run.catch(() => {});
+  return run;
+}
 
 export class SpotifyClient {
   constructor() {
@@ -11,45 +30,52 @@ export class SpotifyClient {
     this.activeAbortControllers = new Map();
   }
 
-  async getAccessToken() {
-    let { spotify_access_token, spotify_refresh_token, spotify_token_expires_at } = 
-      await chrome.storage.local.get(['spotify_access_token', 'spotify_refresh_token', 'spotify_token_expires_at']);
+  async loadTokens() {
+    const tokens = await chrome.storage.local.get(TOKEN_KEYS);
+    if (tokens.spotify_access_token) return tokens;
 
-    // Se não existir, tenta carregar seed token inicial
-    if (!spotify_access_token) {
-      try {
-        const res = await fetch(chrome.runtime.getURL('shared/default-token.json'));
-        if (res.ok) {
-          const seed = await res.json();
-          spotify_access_token = seed.access_token;
-          spotify_refresh_token = seed.refresh_token;
-          spotify_token_expires_at = Date.now() + (seed.expires_in * 1000);
-          await chrome.storage.local.set({
-            spotify_access_token,
-            spotify_refresh_token,
-            spotify_token_expires_at
-          });
-        }
-      } catch (e) {}
+    // Sem token salvo: usa o seed empacotado. Ele pode estar vencido, então força refresh (expires_at = 0).
+    try {
+      const res = await fetch(chrome.runtime.getURL('shared/default-token.json'));
+      if (res.ok) {
+        const seed = await res.json();
+        const seeded = {
+          spotify_access_token: seed.access_token,
+          spotify_refresh_token: seed.refresh_token,
+          spotify_token_expires_at: 0
+        };
+        await chrome.storage.local.set(seeded);
+        return seeded;
+      }
+    } catch (e) {}
+    return tokens;
+  }
+
+  // staleToken: token que acabou de receber 401 e precisa ser trocado mesmo sem ter "expirado"
+  async getAccessToken({ staleToken = null } = {}) {
+    const tokens = await this.loadTokens();
+    const needsRefresh = (t) => isExpiring(t) || (!!staleToken && t.spotify_access_token === staleToken);
+
+    if (!tokens.spotify_refresh_token || !needsRefresh(tokens)) {
+      return tokens.spotify_access_token;
     }
 
-    // G6: Auto-refresh antecipado se faltar menos de 60 segundos para expirar
-    const isExpiring = !spotify_token_expires_at || Date.now() > (spotify_token_expires_at - 60000);
-    if (isExpiring && spotify_refresh_token) {
+    return withRefreshLock(async () => {
+      // Outro contexto pode ter renovado enquanto esperávamos o lock
+      const current = await chrome.storage.local.get(TOKEN_KEYS);
+      if (!needsRefresh(current)) return current.spotify_access_token;
+
       try {
-        const refreshed = await this.refreshToken(spotify_refresh_token);
-        if (refreshed) {
-          spotify_access_token = refreshed.access_token;
-        }
+        const refreshed = await this.refreshToken(current.spotify_refresh_token || tokens.spotify_refresh_token);
+        return refreshed.access_token;
       } catch (err) {
         if (err.message.includes('invalid_grant')) {
           await chrome.storage.local.set({ engineState: 'AUTH_REQUIRED' });
           throw new Error('AUTH_REQUIRED: Sessão do Spotify expirada (6 meses). Faça login novamente.');
         }
+        return current.spotify_access_token || tokens.spotify_access_token;
       }
-    }
-
-    return spotify_access_token;
+    });
   }
 
   async refreshToken(refreshToken) {
@@ -78,10 +104,27 @@ export class SpotifyClient {
     await chrome.storage.local.set({
       spotify_access_token: data.access_token,
       spotify_refresh_token: data.refresh_token || refreshToken,
-      spotify_token_expires_at: expiresAt
+      spotify_token_expires_at: expiresAt,
+      engineState: 'READY'
     });
 
     return data;
+  }
+
+  async send(url, options, token) {
+    const headers = {
+      'Authorization': `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...(options.headers || {})
+    };
+    try {
+      return await fetch(url, { ...options, headers });
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        throw new Error('REQUEST_SUPERSEDED: Operação mais recente enviada.');
+      }
+      throw err;
+    }
   }
 
   // G7 & G10: Método centralizado de requisições
@@ -106,26 +149,24 @@ export class SpotifyClient {
       options.signal = controller.signal;
     }
 
-    const token = await this.getAccessToken();
-    if (!token) throw new Error('AUTH_REQUIRED');
-
-    const headers = {
-      'Authorization': `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      ...(options.headers || {})
-    };
-
     const currentSeq = ++this.requestSequence;
     const url = endpoint.startsWith('http') ? endpoint : `https://api.spotify.com/v1${endpoint}`;
 
     let res;
     try {
-      res = await fetch(url, { ...options, headers });
-    } catch (err) {
-      if (err.name === 'AbortError') {
-        throw new Error('REQUEST_SUPERSEDED: Operação mais recente enviada.');
+      let token = await this.getAccessToken();
+      if (!token) throw new Error('AUTH_REQUIRED');
+
+      res = await this.send(url, options, token);
+
+      // Token recusado antes do vencimento previsto: renova uma vez e repete
+      if (res.status === 401) {
+        const renewed = await this.getAccessToken({ staleToken: token });
+        if (renewed && renewed !== token) {
+          token = renewed;
+          res = await this.send(url, options, token);
+        }
       }
-      throw err;
     } finally {
       if (cancelTag && this.activeAbortControllers.get(cancelTag)?.signal === options.signal) {
         this.activeAbortControllers.delete(cancelTag);

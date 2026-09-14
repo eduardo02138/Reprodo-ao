@@ -21,54 +21,54 @@ export class SpotifyProvider {
     return data.devices || [];
   }
 
-  // Resolve dispositivo alvo dinamicamente verificando se o ID em cache ainda existe
-  async resolveTargetDevice(preferredName = 'Tudo') {
+  // Resolve o dispositivo alvo contra a lista atual: o device_id do Spotify só é persistente "até certo ponto"
+  async resolveTargetDevice({ preferredId = null, preferredName = null, fallbackName = 'Tudo' } = {}) {
     const devices = await this.getDevices();
     if (devices.length === 0) return null;
 
-    const { cachedDeviceId } = await chrome.storage.local.get('cachedDeviceId');
+    const lower = (s) => (s || '').toLowerCase();
+    const exactName = (name) => name && devices.find(d => lower(d.name) === lower(name));
+    const partialName = (name) => name && devices.find(d => lower(d.name).includes(lower(name)));
+    const pick = (device, matchedBy) => (device ? { device, matchedBy } : null);
 
-    // 1. Verifica se o ID cacheado ainda é válido na lista atual
-    if (cachedDeviceId) {
-      const existing = devices.find(d => d.id === cachedDeviceId);
-      if (existing) return existing;
-    }
-
-    // 2. Procura pelo nome preferido ("Tudo" ou "Casa")
-    const matchByName = devices.find(d => d.name.toLowerCase().includes(preferredName.toLowerCase()));
-    if (matchByName) {
-      await chrome.storage.local.set({ cachedDeviceId: matchByName.id });
-      return matchByName;
-    }
-
-    // 3. Fallback: Primeiro dispositivo de áudio disponível
-    const fallback = devices[0];
-    await chrome.storage.local.set({ cachedDeviceId: fallback.id });
-    return fallback;
+    return pick(preferredId && devices.find(d => d.id === preferredId), 'id')
+      || pick(exactName(preferredName), 'name')
+      || pick(exactName(fallbackName) || partialName(fallbackName), 'fallback-name')
+      || pick(devices.find(d => d.is_active), 'active')
+      || pick(devices[0], 'first-available');
   }
 
-  // Busca faixa no catálogo com busca qualificada e fallback amplo
+  // Busca faixa no catálogo: qualificada → ampla → só título
   async searchTrack(title, artist) {
-    let query = `track:"${title}"`;
-    if (artist) query += ` artist:"${artist}"`;
+    const queries = [
+      artist ? `track:"${title}" artist:"${artist}"` : `track:"${title}"`,
+      artist ? `${title} ${artist}` : title,
+      title
+    ];
 
-    let { res } = await this.client.request(`/search?q=${encodeURIComponent(query)}&type=track&limit=5`);
-    let data = await res.json();
-
-    if (data.tracks?.items?.length > 0) {
-      return data.tracks.items;
+    for (const query of [...new Set(queries)]) {
+      const { res } = await this.client.request(`/search?q=${encodeURIComponent(query)}&type=track&limit=5`);
+      if (res.status === 400) continue;
+      if (!res.ok) throw new Error(`Erro na busca do Spotify: ${res.status}`);
+      const data = await res.json();
+      if (data.tracks?.items?.length > 0) return data.tracks.items;
     }
+    return [];
+  }
 
-    // Fallback de busca ampla
-    const fallbackQuery = artist ? `${title} ${artist}` : title;
-    const fallbackRes = await this.client.request(`/search?q=${encodeURIComponent(fallbackQuery)}&type=track&limit=5`);
-    data = await fallbackRes.res.json();
-    return data.tracks?.items || [];
+  async describeResult(res) {
+    if (res.ok) return { ok: true, status: res.status };
+    let error = '';
+    try {
+      const body = await res.json();
+      error = body.error?.message || body.error?.reason || JSON.stringify(body);
+    } catch (e) {}
+    return { ok: false, status: res.status, error };
   }
 
   // Dispara reprodução em dispositivo
   async playTrackOnDevice(deviceId, trackUri) {
-    const endpoint = deviceId 
+    const endpoint = deviceId
       ? `/me/player/play?device_id=${encodeURIComponent(deviceId)}`
       : '/me/player/play';
 
@@ -76,8 +76,15 @@ export class SpotifyProvider {
       method: 'PUT',
       body: JSON.stringify({ uris: [trackUri] })
     });
+    return this.describeResult(res);
+  }
 
-    return res.status === 204 || res.ok;
+  async transferPlayback(deviceId, play = false) {
+    const { res } = await this.client.request('/me/player', {
+      method: 'PUT',
+      body: JSON.stringify({ device_ids: [deviceId], play })
+    });
+    return this.describeResult(res);
   }
 
   // G10: Ajuste de volume com abort tag para evitar race condition

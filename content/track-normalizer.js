@@ -1,33 +1,37 @@
 // track-normalizer.js: Remove ruídos de títulos do YouTube para precisão máxima no catálogo
-function normalizeTrackInfo(rawTitle, rawArtist) {
+function normalizeTrackInfo(rawTitle, rawArtist, source) {
   if (!rawTitle) return { title: '', artist: '' };
 
   let title = rawTitle;
+  let artist = rawArtist || '';
+  const channelIsGeneric = !artist || /topic|vevo/i.test(artist);
+  const contains = (text, part) => !!text && !!part && text.toLowerCase().includes(part.toLowerCase());
 
-  // 1. Trata casos onde o título do vídeo já traz "Artista - Música"
-  if (title.includes(' - ')) {
-    const parts = title.split(' - ');
-    if (!rawArtist || rawArtist.toLowerCase().includes('topic') || rawArtist.toLowerCase().includes('vevo')) {
-      rawArtist = parts[0].trim();
+  // 1. "Artista - Música" é comum no YouTube; no YouTube Music o título já é só a música
+  if (source !== 'youtube-music' && title.includes(' - ')) {
+    const [head, ...rest] = title.split(' - ');
+    const tail = rest.join(' - ').trim();
+    if (!channelIsGeneric && contains(tail, artist) && !contains(head, artist)) {
+      title = head.trim(); // "Música - Artista"
+    } else {
+      artist = head.trim();
+      title = tail;
     }
-    title = parts.slice(1).join(' - ').trim();
   }
 
-  // 2. Remove termos de ruído comuns em clipes de vídeo
+  // 2. Remove termos de ruído comuns em clipes de vídeo (parênteses/colchetes primeiro)
   const noisePatterns = [
+    /\[[^\]]*\]/g,
+    /\([^)]*(official|oficial|video|vídeo|clipe|clip|audio|áudio|lyric|letra|legendado|4k|hd|hq|remaster|visualizer)[^)]*\)/gi,
     /\b(official\s*(music\s*)?video)\b/gi,
     /\b(clipe\s*oficial)\b/gi,
-    /\b(vídeo\s*oficial)\b/gi,
+    /(vídeo\s*oficial)/gi,
     /\b(official\s*audio)\b/gi,
     /\b(audio\s*oficial)\b/gi,
     /\b(lyric\s*video)\b/gi,
-    /\b(letra)\b/gi,
     /\b(visualizer)\b/gi,
-    /\b(4k|hd|1080p)\b/gi,
-    /\b(vevo)\b/gi,
-    /\b(video\s*clip)\b/gi,
-    /\[.*?\]/g, // Remove colchetes [ex: Clipe Oficial]
-    /\(.*?(official|video|clipe|audio|4k|visualizer).*?\)/gi // Remove parênteses contendo ruídos
+    /\b(4k|1080p)\b/gi,
+    /\b(video\s*clip)\b/gi
   ];
 
   for (const pattern of noisePatterns) {
@@ -39,7 +43,7 @@ function normalizeTrackInfo(rawTitle, rawArtist) {
 
   // 4. Limpeza de espaços duplos e pontuações finais
   title = title.replace(/\s+/g, ' ').replace(/[\|\-–—]+$/, '').trim();
-  const artist = (rawArtist || '').replace(/- Topic$/i, '').trim();
+  artist = artist.replace(/\s*-\s*Topic$/i, '').replace(/VEVO$/i, '').trim();
 
   return {
     title,

@@ -1,20 +1,27 @@
 // logger.js: Sistema de Telemetria e Logs em tempo real persistente no chrome.storage
-export async function logTelemetry(stage, data = {}) {
-  const timestamp = new Date().toISOString().split('T')[1].slice(0, 8);
+const MAX_LOGS = 80;
+
+// Gravações em série: get→unshift→set concorrentes perdiam eventos
+let writeQueue = Promise.resolve();
+
+export function logTelemetry(stage, data = {}) {
+  const time = new Date().toLocaleTimeString('pt-BR', { hour12: false });
   const logEntry = {
-    time: timestamp,
+    time,
+    at: Date.now(),
     stage,
     data,
     id: Math.random().toString(36).substring(2, 7)
   };
 
-  console.log(`[TELEMETRIA ${timestamp}] [${stage}]`, data);
+  console.log(`[TELEMETRIA ${time}] [${stage}]`, data);
 
-  try {
-    const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
-    telemetryLogs.unshift(logEntry);
-    // Mantém os últimos 40 registros
-    if (telemetryLogs.length > 40) telemetryLogs.pop();
-    await chrome.storage.local.set({ telemetryLogs });
-  } catch (e) {}
+  writeQueue = writeQueue
+    .then(async () => {
+      const { telemetryLogs = [] } = await chrome.storage.local.get('telemetryLogs');
+      telemetryLogs.unshift(logEntry);
+      await chrome.storage.local.set({ telemetryLogs: telemetryLogs.slice(0, MAX_LOGS) });
+    })
+    .catch(() => {});
+  return writeQueue;
 }
