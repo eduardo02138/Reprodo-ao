@@ -354,6 +354,15 @@ test('login: PKCE authorize URL, state check, code exchange and tokens stored', 
   assert.equal(handoff.handoff.success, true, handoff.handoff.message);
 });
 
+test('Spotify refusing the authorization page explains which Client ID and Redirect URI to check', async () => {
+  identityHandler = () => { throw new Error('Authorization page could not be loaded.'); };
+  const res = await send({ type: 'SPOTIFY_LOGIN' }, {});
+  assert.equal(res.success, false);
+  assert.ok(res.message.includes('Redirect URI cadastrada é exatamente https://testextid.chromiumapp.org/spotify'), res.message);
+  assert.ok(res.message.includes(CLIENT_ID.slice(-4)), res.message);
+  assert.match(storage.authError, /AUTH_PAGE_REJECTED/);
+});
+
 test('login with a mismatching state is rejected and stores nothing', async () => {
   const tokenBefore = storage.spotify_access_token;
   identityHandler = () => 'https://testextid.chromiumapp.org/spotify?code=good-code&state=forged';

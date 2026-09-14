@@ -56,6 +56,11 @@ export async function loginWithSpotify({ interactive = true } = {}) {
       ...(interactive ? {} : { abortOnLoadForNonInteractive: false, timeoutMsForNonInteractive: 10000 })
     });
   } catch (err) {
+    // Spotify answers a Client ID / Redirect URI that don't match the app with an error page,
+    // which Chrome only reports as "Authorization page could not be loaded"
+    if (/could not be loaded/i.test(err.message)) {
+      throw new Error(`AUTH_PAGE_REJECTED: O Spotify recusou a autorização. No app do Spotify Developer Dashboard confira: o Client ID salvo (termina em …${clientId.slice(-4)}) é desse app, a Web API está marcada e a Redirect URI cadastrada é exatamente ${redirectUri}`);
+    }
     throw new Error(interactive
       ? `Login cancelado ou bloqueado: ${err.message}`
       : `Login automático não foi possível: ${err.message}`);

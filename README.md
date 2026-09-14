@@ -40,6 +40,8 @@ Cada navegador ou pasta carregada gera um ID de extensão diferente, e com ele u
 
 Se o popup disser que o login está indisponível (sem `chrome.identity`), o navegador não concedeu a permissão `identity`. Remova a extensão e carregue a pasta de novo.
 
+Se o login falhar com "O Spotify recusou a autorização" (no Chrome: "Authorization page could not be loaded"), o Client ID salvo não é do app onde a Redirect URI está cadastrada, a Web API não está marcada no app, ou a Redirect URI cadastrada não é exatamente a mostrada no card. Depois de trocar o código da extensão, recarregue-a em `chrome://extensions`.
+
 Requisitos:
 - Conta **Spotify Premium** (a Web API só controla reprodução em contas Premium).
 - O dispositivo precisa aparecer no Spotify Connect. Se as Alexas não aparecerem, diga "Alexa, tocar Spotify" para acordá-las.
