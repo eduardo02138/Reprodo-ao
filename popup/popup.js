@@ -1,6 +1,6 @@
 // popup.js — Popup controller with all logic inside DOMContentLoaded
 import { SpotifyProvider } from '../providers/spotify-provider.js';
-import { TOKEN_KEYS } from '../shared/spotify-config.js';
+import { TOKEN_KEYS, CLIENT_ID_KEY, TOKEN_CLIENT_ID_KEY, CLIENT_ID_PATTERN } from '../shared/spotify-config.js';
 
 // Track titles come from YouTube uploaders: never inject them as HTML
 const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (c) => ({
@@ -61,6 +61,9 @@ document.addEventListener('DOMContentLoaded', async () => {
   const authErrorEl = document.getElementById('auth-error');
   const redirectUriEl = document.getElementById('redirect-uri');
   const copyRedirectBtn = document.getElementById('copy-redirect-btn');
+  const clientIdInput = document.getElementById('client-id-input');
+  const saveClientIdBtn = document.getElementById('save-client-id-btn');
+  const clientIdStatus = document.getElementById('client-id-status');
 
   const provider = new SpotifyProvider();
   let currentTrack = null;
@@ -70,6 +73,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   let isCurrentlyPlaying = false;
   let volumeDebounceTimer = null;
   let isConnected = false;
+  let savedClientId = '';
 
   // ───── 1. Load saved state ─────
   const storage = await chrome.storage.local.get([
@@ -166,7 +170,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   async function renderAuthState() {
-    const data = await chrome.storage.local.get([...TOKEN_KEYS, 'engineState', 'authError', 'spotifyDisplayName']);
+    const data = await chrome.storage.local.get([...TOKEN_KEYS, CLIENT_ID_KEY, 'engineState', 'authError', 'spotifyDisplayName']);
     isConnected = !!(data.spotify_access_token || data.spotify_refresh_token) && data.engineState !== 'AUTH_REQUIRED';
 
     authIndicator.textContent = isConnected
@@ -177,6 +181,12 @@ document.addEventListener('DOMContentLoaded', async () => {
     authBtn.className = isConnected ? 'btn-account secondary' : 'btn-account';
     authSetup?.classList.toggle('hidden', isConnected);
     if (authErrorEl) authErrorEl.textContent = !isConnected && data.authError ? data.authError : '';
+
+    savedClientId = data[CLIENT_ID_KEY] || '';
+    if (clientIdInput && document.activeElement !== clientIdInput) clientIdInput.value = savedClientId;
+    // Login needs the user's own Spotify app first
+    authBtn.disabled = !isConnected && !savedClientId;
+    authBtn.title = authBtn.disabled ? 'Salve o Client ID do seu app Spotify primeiro' : '';
 
     if (isConnected && !data.spotifyDisplayName) cacheProfileName();
     return isConnected;
@@ -193,7 +203,7 @@ document.addEventListener('DOMContentLoaded', async () => {
   async function tryAutomaticLogin() {
     const { spotifyAuthorizedOnce, autoReauthDisabled } =
       await chrome.storage.local.get(['spotifyAuthorizedOnce', 'autoReauthDisabled']);
-    if (isConnected || !identityAvailable || !spotifyAuthorizedOnce || autoReauthDisabled) return false;
+    if (isConnected || !identityAvailable || !spotifyAuthorizedOnce || autoReauthDisabled || !savedClientId) return false;
 
     authIndicator.textContent = 'Spotify: entrando automaticamente…';
     authBtn.disabled = true;
@@ -243,9 +253,42 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
+  function setClientIdStatus(text, isError = false) {
+    clientIdStatus.textContent = text;
+    clientIdStatus.className = `client-id-status${isError ? ' error' : ''}`;
+  }
+
+  async function saveClientId() {
+    const value = clientIdInput.value.trim();
+    if (!CLIENT_ID_PATTERN.test(value)) {
+      setClientIdStatus('Client ID inválido: são 32 caracteres (0-9 e a-f), copiados da página do app.', true);
+      return;
+    }
+
+    const { [TOKEN_CLIENT_ID_KEY]: tokenClientId } = await chrome.storage.local.get(TOKEN_CLIENT_ID_KEY);
+    await chrome.storage.local.set({ [CLIENT_ID_KEY]: value });
+    // Tokens belong to the app that issued them: another app needs a new login
+    if (tokenClientId && tokenClientId !== value) {
+      await chrome.runtime.sendMessage({ type: 'SPOTIFY_LOGOUT' }).catch(() => {});
+    }
+
+    setClientIdStatus('✓ Client ID salvo. Agora clique em Conectar Spotify.');
+    clientIdInput.blur();
+    await renderAuthState();
+  }
+
+  if (saveClientIdBtn && clientIdInput) {
+    saveClientIdBtn.addEventListener('click', saveClientId);
+    clientIdInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') saveClientId();
+    });
+  }
+
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'local') return;
-    if (changes.spotify_access_token || changes.engineState || changes.authError || changes.spotifyDisplayName) renderAuthState();
+    if (changes.spotify_access_token || changes.engineState || changes.authError || changes.spotifyDisplayName || changes[CLIENT_ID_KEY]) {
+      renderAuthState();
+    }
     if (changes.lastHandoffResult) renderLastHandoff(changes.lastHandoffResult.newValue);
   });
 

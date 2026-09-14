@@ -88,6 +88,7 @@ globalThis.fetch = async (url, opts = {}) => {
       if (body.get('code') !== 'good-code' || !body.get('code_verifier')) return json({ error: 'invalid_grant' }, 400);
     } else {
       S.refreshCalls++;
+      S.lastRefreshClientId = body.get('client_id');
       if (body.get('refresh_token') !== S.validRefresh) return json({ error: 'invalid_grant', error_description: 'Refresh token revoked' }, 400);
     }
     S.tokenSeq++;
@@ -121,12 +122,14 @@ globalThis.fetch = async (url, opts = {}) => {
   return json({ error: 'not mocked' }, 500);
 };
 
+const CLIENT_ID = 'abcdef0123456789abcdef0123456789';
 const freshTokens = () => ({
   spotify_access_token: S.validAccess,
   spotify_refresh_token: S.validRefresh,
-  spotify_token_expires_at: Date.now() + 3600 * 1000
+  spotify_token_expires_at: Date.now() + 3600 * 1000,
+  spotifyTokenClientId: CLIENT_ID
 });
-Object.assign(storage, freshTokens());
+Object.assign(storage, freshTokens(), { spotifyClientId: CLIENT_ID });
 
 await import('../../background/service-worker.js');
 const { SpotifyClient } = await import('../../shared/spotify-client.js');
@@ -279,6 +282,7 @@ test('401 before the token expires: refreshes once and repeats the call', async 
   const res = await detect('Take On Me', 'a-ha', 'page-6');
   assert.equal(res.handoff.success, true, res.handoff.message);
   assert.equal(S.refreshCalls, before + 1);
+  assert.equal(S.lastRefreshClientId, CLIENT_ID, 'refresh must use the app that issued the tokens');
 });
 
 test('concurrent refresh with a rotating refresh token happens once and keeps the session', async () => {
@@ -308,6 +312,17 @@ test('without a Spotify account no request reaches the Web API', async () => {
   assert.deepEqual(S.calls.filter(c => c.includes('api.spotify.com')), []);
 });
 
+test('login without a saved Client ID explains what to do and opens no window', async () => {
+  let opened = false;
+  identityHandler = () => { opened = true; };
+  delete storage.spotifyClientId;
+  const res = await send({ type: 'SPOTIFY_LOGIN' }, {});
+  assert.equal(res.success, false);
+  assert.match(res.message, /Client ID/);
+  assert.equal(opened, false);
+  storage.spotifyClientId = CLIENT_ID;
+});
+
 test('login: PKCE authorize URL, state check, code exchange and tokens stored', async () => {
   let authorize;
   identityHandler = (url) => {
@@ -317,6 +332,7 @@ test('login: PKCE authorize URL, state check, code exchange and tokens stored', 
   const res = await send({ type: 'SPOTIFY_LOGIN' }, {});
   assert.equal(res.success, true, res.message);
 
+  assert.equal(authorize.get('client_id'), CLIENT_ID);
   assert.equal(authorize.get('response_type'), 'code');
   assert.equal(authorize.get('code_challenge_method'), 'S256');
   assert.equal(authorize.get('redirect_uri'), 'https://testextid.chromiumapp.org/spotify');
@@ -326,6 +342,8 @@ test('login: PKCE authorize URL, state check, code exchange and tokens stored', 
   const expectedChallenge = createHash('sha256').update(exchange.code_verifier).digest('base64url');
   assert.equal(authorize.get('code_challenge'), expectedChallenge);
   assert.ok(exchange.code_verifier.length >= 43);
+  assert.equal(exchange.client_id, CLIENT_ID);
+  assert.equal(storage.spotifyTokenClientId, CLIENT_ID);
 
   assert.equal(storage.spotify_access_token, S.validAccess);
   assert.equal(storage.engineState, 'READY');
@@ -507,6 +525,18 @@ test('AUTH-04: usuario clica Desconectar -> nenhuma tentativa automatica ocorre 
     (err) => err.message.startsWith('AUTH_REQUIRED')
   );
   assert.equal(webAuthFlowCalls, 0, 'Cliente não deve disparar silent login após logout explícito');
+});
+
+test('old tokens without a known Client ID ask for a new login instead of failing silently', async () => {
+  const savedClientId = storage.spotifyClientId;
+  delete storage.spotifyClientId;
+  delete storage.spotifyTokenClientId;
+  Object.assign(storage, { spotify_access_token: 'legacy', spotify_refresh_token: 'legacy', spotify_token_expires_at: 0, engineState: 'READY' });
+
+  const res = await detect('POWER', 'Kanye West', 'page-13');
+  assert.equal(res.handoff.errorCode, 'AUTH_REQUIRED');
+  assert.equal(storage.spotify_refresh_token, undefined);
+  storage.spotifyClientId = savedClientId;
 });
 
 test('telemetry keeps every event written concurrently', async () => {

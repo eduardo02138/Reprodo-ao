@@ -55,7 +55,9 @@ async function setHandoffState(state, correlationId) {
 
 // Spotify client errors start with a code (see shared/spotify-client.js)
 function classifyError(message = '') {
-  if (message.startsWith('AUTH_REQUIRED')) return { state: HandoffState.AUTH_REQUIRED, retryable: false };
+  if (message.startsWith('AUTH_REQUIRED') || message.startsWith('CLIENT_ID_REQUIRED')) {
+    return { state: HandoffState.AUTH_REQUIRED, retryable: false };
+  }
   if (message.startsWith('QUOTA_EXCEEDED')) return { state: HandoffState.RATE_LIMITED, retryable: false };
   if (message.startsWith('RATE_LIMITED')) return { state: HandoffState.RATE_LIMITED, retryable: true };
   return { state: HandoffState.TEMPORARY_FAILURE, retryable: true };

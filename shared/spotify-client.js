@@ -1,7 +1,7 @@
 // spotify-client.js: Centralized Spotify API client with serialized token refresh,
 // one retry on 401, rate limit handling, abort controllers and error categorization.
 // Error messages start with a code (AUTH_REQUIRED, RATE_LIMITED, QUOTA_EXCEEDED, TEMPORARY_FAILURE).
-import { SPOTIFY_CLIENT_ID, TOKEN_KEYS } from './spotify-config.js';
+import { TOKEN_KEYS, TOKEN_CLIENT_ID_KEY, getClientId } from './spotify-config.js';
 import { loginWithSpotify } from './auth.js';
 
 const REFRESH_MARGIN_MS = 60000;
@@ -86,7 +86,7 @@ export class SpotifyClient {
         const refreshed = await this.refreshToken(current.spotify_refresh_token);
         return refreshed.access_token;
       } catch (err) {
-        if (err.message === 'invalid_grant') {
+        if (err.message === 'invalid_grant' || err.message === 'missing_client_id') {
           // Refresh token revoked or older than 6 months: only a new login fixes it
           await chrome.storage.local.remove(TOKEN_KEYS);
           const silentToken = await trySilentLogin();
@@ -105,8 +105,13 @@ export class SpotifyClient {
   }
 
   async refreshToken(refreshToken) {
+    const { [TOKEN_CLIENT_ID_KEY]: tokenClientId } = await chrome.storage.local.get(TOKEN_CLIENT_ID_KEY);
+    const clientId = tokenClientId || await getClientId();
+    // Tokens from before the Client ID moved to the panel: only a new login fixes them
+    if (!clientId) throw new Error('missing_client_id');
+
     const params = new URLSearchParams();
-    params.append('client_id', SPOTIFY_CLIENT_ID);
+    params.append('client_id', clientId);
     params.append('grant_type', 'refresh_token');
     params.append('refresh_token', refreshToken);
 
@@ -129,6 +134,7 @@ export class SpotifyClient {
       spotify_access_token: data.access_token,
       spotify_refresh_token: data.refresh_token || refreshToken,
       spotify_token_expires_at: Date.now() + (data.expires_in * 1000),
+      [TOKEN_CLIENT_ID_KEY]: clientId,
       engineState: 'READY'
     });
 

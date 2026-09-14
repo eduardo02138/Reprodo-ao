@@ -31,9 +31,12 @@ Extensão para Google Chrome (Manifest V3). Detecta a música tocando no **YouTu
    git clone https://github.com/eduardo02138/Reprodo-ao.git
    ```
 2. Abra `chrome://extensions`, ative **Modo do desenvolvedor**, clique em **Carregar sem compactação** e escolha a pasta do repositório.
-3. Abra o popup. No card **Conta Spotify** (topo), copie a **Redirect URI** (`https://<id-da-extensão>.chromiumapp.org/spotify`). Cada navegador ou pasta carregada gera um ID diferente; cadastre a URI de cada um.
-4. Em <https://developer.spotify.com/dashboard>, abra o app cujo Client ID está em `shared/spotify-config.js` (ou crie o seu app e troque o ID nesse arquivo) e adicione a Redirect URI.
-5. No card, clique em **Conectar Spotify** e autorize. Das próximas vezes o login é automático.
+3. Abra o popup. Todo o resto é feito no card **Conta Spotify**, no topo, sem editar código:
+   1. Crie um app (grátis) em <https://developer.spotify.com/dashboard>, marque **Web API** e adicione a **Redirect URI** mostrada no card (`https://<id-da-extensão>.chromiumapp.org/spotify`, com botão de copiar).
+   2. Cole o **Client ID** do app no campo do card e clique em **Salvar**. Use só o Client ID: o fluxo PKCE não usa o Client Secret, e ele nunca deve ser colado.
+   3. Clique em **Conectar Spotify** e autorize. Das próximas vezes o login é automático.
+
+Cada navegador ou pasta carregada gera um ID de extensão diferente, e com ele uma Redirect URI diferente. Cadastre a de cada um. Trocar o Client ID desconecta a conta, porque os tokens pertencem ao app que os emitiu.
 
 Se o popup disser que o login está indisponível (sem `chrome.identity`), o navegador não concedeu a permissão `identity`. Remova a extensão e carregue a pasta de novo.
 
@@ -45,9 +48,16 @@ Requisitos:
 
 ## Segurança
 
-- Nenhum token fica no código. Tokens ficam só no `chrome.storage.local` do seu navegador.
+- Nenhum token nem Client ID fica no código. Tokens e Client ID ficam só no `chrome.storage.local` do seu navegador.
 - Os commits `08ec4cd`, `72bb9fc` e `06d59bc` deste repositório continham tokens reais do Spotify (`shared/default-token.json`). Se esses tokens eram da sua conta, revogue o acesso do app em <https://www.spotify.com/account/apps/>.
 - Refresh de token serializado entre popup e service worker (Web Locks). O Spotify rotaciona o refresh token; dois refresh simultâneos derrubariam a sessão.
+
+---
+
+## Publicação
+
+- Cada pessoa usa o próprio app do Spotify, então a extensão funciona para qualquer um sem aprovação do Spotify. Um app em modo de desenvolvimento só aceita as contas cadastradas no painel dele (até 25), por isso um app único compartilhado não serve para uso público.
+- Publicada na Chrome Web Store, a extensão tem ID fixo, e a Redirect URI passa a ser a mesma para todos os usuários.
 
 ---
 
@@ -76,7 +86,7 @@ content/track-normalizer.js    Limpeza de títulos do YouTube
 providers/spotify-provider.js  Dispositivos, busca, play, transferência, volume
 shared/spotify-client.js       Cliente Web API: refresh serializado, 401, 429/Retry-After
 shared/auth.js                 OAuth PKCE (chrome.identity)
-shared/spotify-config.js       Client ID e escopos
+shared/spotify-config.js       Escopos e chaves de storage (o Client ID vem do painel)
 shared/confidence-engine.js    Pontuação de match YouTube → Spotify
 shared/logger.js               Telemetria
 popup/                         Interface

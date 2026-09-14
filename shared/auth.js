@@ -1,5 +1,5 @@
 // auth.js: Spotify OAuth 2.0 with PKCE for Chrome extensions (no client secret)
-import { SPOTIFY_CLIENT_ID, SPOTIFY_SCOPES, TOKEN_KEYS } from './spotify-config.js';
+import { SPOTIFY_SCOPES, TOKEN_KEYS, TOKEN_CLIENT_ID_KEY, getClientId } from './spotify-config.js';
 
 function base64UrlEncode(bytes) {
   let binary = '';
@@ -30,12 +30,16 @@ export function getRedirectUri() {
 // interactive=false is the automatic login: no window, it only succeeds when the user already
 // authorized the app and is still signed in to Spotify in this browser.
 export async function loginWithSpotify({ interactive = true } = {}) {
+  const redirectUri = getRedirectUri();
+  const clientId = await getClientId();
+  if (!clientId) {
+    throw new Error('CLIENT_ID_REQUIRED: Cole e salve o Client ID do seu app Spotify no card Conta Spotify.');
+  }
   const verifier = randomToken(64);
   const state = randomToken(16);
-  const redirectUri = getRedirectUri();
 
   const authUrl = new URL('https://accounts.spotify.com/authorize');
-  authUrl.searchParams.set('client_id', SPOTIFY_CLIENT_ID);
+  authUrl.searchParams.set('client_id', clientId);
   authUrl.searchParams.set('response_type', 'code');
   authUrl.searchParams.set('redirect_uri', redirectUri);
   authUrl.searchParams.set('code_challenge_method', 'S256');
@@ -64,12 +68,12 @@ export async function loginWithSpotify({ interactive = true } = {}) {
   const code = params.get('code');
   if (!code) throw new Error('Spotify não retornou o código de autorização.');
 
-  return exchangeCodeForToken(code, redirectUri, verifier);
+  return exchangeCodeForToken(code, redirectUri, verifier, clientId);
 }
 
-async function exchangeCodeForToken(code, redirectUri, codeVerifier) {
+async function exchangeCodeForToken(code, redirectUri, codeVerifier, clientId) {
   const body = new URLSearchParams({
-    client_id: SPOTIFY_CLIENT_ID,
+    client_id: clientId,
     grant_type: 'authorization_code',
     code,
     redirect_uri: redirectUri,
@@ -92,6 +96,7 @@ async function exchangeCodeForToken(code, redirectUri, codeVerifier) {
     spotify_access_token: data.access_token,
     spotify_refresh_token: data.refresh_token,
     spotify_token_expires_at: Date.now() + data.expires_in * 1000,
+    [TOKEN_CLIENT_ID_KEY]: clientId,
     engineState: 'READY',
     // Enables the automatic (silent) login when this session is lost later
     spotifyAuthorizedOnce: true,

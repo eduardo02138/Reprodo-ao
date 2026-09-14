@@ -23,12 +23,18 @@
         <button id="auth-btn" class="btn-account">Conectar Spotify</button>
       </div>
       <div id="auth-setup" class="auth-setup hidden">
-        <p class="auth-step">1. No <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>, abra o app e adicione esta Redirect URI:</p>
+        <p class="auth-step">1. Crie um app (grátis) no <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>, marque <strong>Web API</strong> e adicione esta Redirect URI:</p>
         <div class="redirect-row">
           <code id="redirect-uri"></code>
           <button id="copy-redirect-btn" class="btn-sm-text" title="Copiar Redirect URI">📋</button>
         </div>
-        <p class="auth-step">2. Clique em <strong>Conectar Spotify</strong> e autorize. Depois disso o login é automático.</p>
+        <p class="auth-step">2. Cole o <strong>Client ID</strong> do app e salve (não use o Client Secret):</p>
+        <div class="client-id-row">
+          <input id="client-id-input" type="text" placeholder="Client ID (32 caracteres)" maxlength="64" autocomplete="off" spellcheck="false">
+          <button id="save-client-id-btn" class="btn-sm-action">Salvar</button>
+        </div>
+        <p id="client-id-status" class="client-id-status"></p>
+        <p class="auth-step">3. Clique em <strong>Conectar Spotify</strong> e autorize. Depois disso o login é automático.</p>
         <p id="auth-error" class="auth-error"></p>
       </div>
     </section>

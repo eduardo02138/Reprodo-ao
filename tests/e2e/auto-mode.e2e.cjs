@@ -202,11 +202,35 @@ async function routeSpotify(ctx) {
     record('A0', 'Sem conta: popup oferece login e mostra a Redirect URI', ok ? 'PASS' : 'FAIL', r);
   } catch (e) { record('A0', 'Sem conta: popup oferece login e mostra a Redirect URI', 'FAIL', { error: e.message }); }
 
+  // A0b — Client ID is saved from the panel (no code change) and unlocks the login button
+  try {
+    const r = await withPopup(async (popup) => {
+      const btnDisabledBefore = await popup.$eval('#auth-btn', b => b.disabled);
+      await popup.fill('#client-id-input', '123');
+      await popup.click('#save-client-id-btn');
+      const invalidMsg = (await popup.textContent('#client-id-status')).trim();
+      await popup.fill('#client-id-input', 'abcdef0123456789abcdef0123456789');
+      await popup.click('#save-client-id-btn');
+      await sleep(500);
+      return {
+        btnDisabledBefore,
+        invalidMsg,
+        validMsg: (await popup.textContent('#client-id-status')).trim(),
+        btnDisabledAfter: await popup.$eval('#auth-btn', b => b.disabled),
+        stored: (await sw.evaluate(() => chrome.storage.local.get('spotifyClientId'))).spotifyClientId
+      };
+    });
+    const ok = r.btnDisabledBefore && /inválido/.test(r.invalidMsg) && /salvo/.test(r.validMsg)
+      && !r.btnDisabledAfter && r.stored === 'abcdef0123456789abcdef0123456789';
+    record('A0b', 'Client ID salvo pelo painel libera o login', ok ? 'PASS' : 'FAIL', r);
+  } catch (e) { record('A0b', 'Client ID salvo pelo painel libera o login', 'FAIL', { error: e.message }); }
+
   // Simulates a finished login (the OAuth window itself cannot run headless)
   await sw.evaluate(async () => chrome.storage.local.set({
     spotify_access_token: 'mock-access',
     spotify_refresh_token: 'mock-refresh',
     spotify_token_expires_at: Date.now() + 3600 * 1000,
+    spotifyTokenClientId: 'abcdef0123456789abcdef0123456789',
     engineState: 'READY'
   }));
 

@@ -711,3 +711,31 @@ input:checked + .slider:before {
 .btn-account.secondary:hover { color: #fff; }
 .account-card .auth-setup { background: transparent; border: none; padding: 0; }
 .auth-step { margin: 0; }
+
+/* Client ID of the user's own Spotify app */
+.client-id-row { display: flex; gap: 4px; }
+.client-id-row input {
+  flex: 1;
+  min-width: 0;
+  background: #111;
+  border: 1px solid #333;
+  border-radius: 4px;
+  color: #ddd;
+  font-size: 10px;
+  font-family: monospace;
+  padding: 4px 6px;
+}
+.client-id-row input:focus { outline: none; border-color: #1db954; }
+.btn-sm-action {
+  background: #2a2a2a;
+  border: 1px solid #3a3a3a;
+  color: #ddd;
+  border-radius: 4px;
+  font-size: 10px;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+.btn-sm-action:hover { border-color: #1db954; color: #fff; }
+.client-id-status { margin: 0; font-size: 10px; color: #1db954; }
+.client-id-status.error { color: #ff5555; }
+.client-id-status:empty { display: none; }
