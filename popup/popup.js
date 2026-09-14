@@ -55,8 +55,11 @@ document.addEventListener('DOMContentLoaded', async () => {
   const exportLogsBtn = document.getElementById('export-logs-btn');
 
   // Spotify account elements
+  const headerStatusBadge = document.getElementById('header-status-badge');
+  const authStatusDot = document.getElementById('auth-status-dot');
   const authIndicator = document.getElementById('auth-indicator');
   const authBtn = document.getElementById('auth-btn');
+  const toggleSetupBtn = document.getElementById('toggle-setup-btn');
   const authSetup = document.getElementById('auth-setup');
   const authErrorEl = document.getElementById('auth-error');
   const redirectUriEl = document.getElementById('redirect-uri');
@@ -110,6 +113,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     keepVideoPlayingToggle.addEventListener('change', async (e) => {
       const keep = e.target.checked;
       await chrome.storage.local.set({ keepVideoPlaying: keep });
+      updateHandoffButtonState();
       showStatus(
         keep ? 'Vídeo continuará passando (mudo)' : 'Vídeo será pausado no YouTube',
         '#1db954'
@@ -185,17 +189,56 @@ document.addEventListener('DOMContentLoaded', async () => {
       : 'Indisponível: este navegador não oferece chrome.identity';
   }
 
+  let setupManuallyExpanded = false;
+
+  if (toggleSetupBtn) {
+    toggleSetupBtn.addEventListener('click', () => {
+      setupManuallyExpanded = !setupManuallyExpanded;
+      authSetup?.classList.toggle('hidden', !setupManuallyExpanded);
+      toggleSetupBtn.textContent = setupManuallyExpanded ? 'Fechar ▴' : 'Configurar ▾';
+    });
+  }
+
   async function renderAuthState() {
     const data = await chrome.storage.local.get([...TOKEN_KEYS, CLIENT_ID_KEY, 'engineState', 'authError', 'spotifyDisplayName']);
     isConnected = !!(data.spotify_access_token || data.spotify_refresh_token) && data.engineState !== 'AUTH_REQUIRED';
 
     authIndicator.textContent = isConnected
-      ? `Conectado como ${data.spotifyDisplayName || 'sua conta'} ✓`
-      : 'Spotify: desconectado';
+      ? `Conectado como ${data.spotifyDisplayName || 'sua conta'}`
+      : (data[CLIENT_ID_KEY] ? 'Pronto para conectar' : 'Spotify desconectado');
     authIndicator.className = `auth-text ${isConnected ? 'connected' : 'disconnected'}`;
-    authBtn.textContent = isConnected ? 'Desconectar' : 'Conectar Spotify';
+
+    if (authStatusDot) {
+      authStatusDot.className = `auth-dot ${isConnected ? 'connected' : 'disconnected'}`;
+    }
+
+    if (headerStatusBadge) {
+      headerStatusBadge.className = `badge-status-dot ${isConnected ? (isCurrentlyPlaying ? 'playing' : 'connected') : 'off'}`;
+      headerStatusBadge.title = isConnected ? 'Spotify Conectado' : 'Spotify Desconectado';
+    }
+
+    authBtn.textContent = isConnected ? 'Desconectar' : 'Conectar';
     authBtn.className = isConnected ? 'btn-account secondary' : 'btn-account';
-    authSetup?.classList.toggle('hidden', isConnected);
+
+    // Se estiver conectado, esconde a área de setup e o botão de configurar
+    if (isConnected) {
+      authSetup?.classList.add('hidden');
+      toggleSetupBtn?.classList.add('hidden');
+      setupManuallyExpanded = false;
+    } else {
+      // Se não tiver Client ID, deixa o botão de configurar visível
+      toggleSetupBtn?.classList.remove('hidden');
+      if (!savedClientId && !setupManuallyExpanded) {
+        // Se nunca configurou, abre automaticamente
+        setupManuallyExpanded = true;
+        authSetup?.classList.remove('hidden');
+        if (toggleSetupBtn) toggleSetupBtn.textContent = 'Fechar ▴';
+      } else {
+        authSetup?.classList.toggle('hidden', !setupManuallyExpanded);
+        if (toggleSetupBtn) toggleSetupBtn.textContent = setupManuallyExpanded ? 'Fechar ▴' : 'Configurar ▾';
+      }
+    }
+
     if (authErrorEl) authErrorEl.textContent = !isConnected && data.authError ? data.authError : '';
 
     savedClientId = data[CLIENT_ID_KEY] || '';
@@ -342,7 +385,10 @@ document.addEventListener('DOMContentLoaded', async () => {
   function updateHandoffButtonState() {
     if (currentTrack) {
       handoffBtn.disabled = false;
-      handoffBtnText.textContent = `▶ Pausar YouTube & Tocar em ${selectedDeviceName}`;
+      const keepMuted = !!keepVideoPlayingToggle?.checked;
+      handoffBtnText.textContent = keepMuted
+        ? `▶ Tocar em ${selectedDeviceName}`
+        : `▶ Pausar YouTube & Tocar em ${selectedDeviceName}`;
     } else {
       handoffBtn.disabled = true;
       handoffBtnText.textContent = `▶ Selecione uma música no YouTube`;
@@ -636,7 +682,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       }
       handoffBtn.disabled = false;
       handoffSpinner.classList.add('hidden');
-      handoffBtnText.textContent = `▶ Pausar YouTube & Tocar em ${selectedDeviceName}`;
+      updateHandoffButtonState();
 
       if (res && res.success) {
         showStatus(

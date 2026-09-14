@@ -2,44 +2,58 @@
 <html lang="pt-BR">
 <head>
   <meta charset="UTF-8">
-  <title>Connect - Multi Dispositivos</title>
+  <title>Sync Music — YouTube to Spotify Connect</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
   <div class="container">
-    <!-- Cabeçalho -->
+    <!-- Cabeçalho de Produto -->
     <header class="header">
-      <div class="title-row">
-        <h2>Conectar a um dispositivo</h2>
+      <div class="header-left">
+        <img src="../icons/icon-48.png" class="app-logo" alt="Logo">
+        <div>
+          <h1 class="app-title">Sync Music</h1>
+          <p class="subtitle">YouTube → Spotify Connect</p>
+        </div>
+      </div>
+      <div class="header-right">
+        <span id="header-status-badge" class="badge-status-dot off" title="Status de conexão"></span>
         <span id="close-btn" class="close-icon" title="Fechar">&times;</span>
       </div>
-      <p class="subtitle">Controle em tempo real de Alexas, TV e Dispositivos</p>
     </header>
 
-    <!-- Conta Spotify: login, login automático e primeiro acesso -->
+    <!-- Conta Spotify: Card compacto e expansível -->
     <section id="account-card" class="account-card">
       <div class="account-row">
-        <span id="auth-indicator" class="auth-text">Spotify: verificando…</span>
-        <button id="auth-btn" class="btn-account">Conectar Spotify</button>
+        <div class="account-status-group">
+          <span id="auth-status-dot" class="auth-dot disconnected"></span>
+          <span id="auth-indicator" class="auth-text">Spotify desconectado</span>
+        </div>
+        <div class="account-actions">
+          <button id="toggle-setup-btn" class="btn-setup-toggle hidden" title="Ver configuração">Configurar ▾</button>
+          <button id="auth-btn" class="btn-account">Conectar</button>
+        </div>
       </div>
+      
       <div id="auth-setup" class="auth-setup hidden">
-        <p class="auth-step">1. Crie um app (grátis) no <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>, marque <strong>Web API</strong> e adicione esta Redirect URI:</p>
+        <div class="setup-divider"></div>
+        <p class="auth-step">1. No <a href="https://developer.spotify.com/dashboard" target="_blank" rel="noopener">Spotify Developer Dashboard</a>, marque <strong>Web API</strong> e cadastre esta Redirect URI:</p>
         <div class="redirect-row">
           <code id="redirect-uri"></code>
           <button id="copy-redirect-btn" class="btn-sm-text" title="Copiar Redirect URI">📋</button>
         </div>
-        <p class="auth-step">2. Cole o <strong>Client ID</strong> do app e salve (não use o Client Secret):</p>
+        <p class="auth-step">2. Cole o <strong>Client ID</strong> do seu app (não use o Client Secret):</p>
         <div class="client-id-row">
           <input id="client-id-input" type="text" placeholder="Client ID (32 caracteres)" maxlength="64" autocomplete="off" spellcheck="false">
           <button id="save-client-id-btn" class="btn-sm-action">Salvar</button>
         </div>
         <p id="client-id-status" class="client-id-status"></p>
-        <p class="auth-step">3. Clique em <strong>Conectar Spotify</strong> e autorize. Depois disso o login é automático.</p>
+        <p class="auth-step">3. Clique em <strong>Conectar Spotify</strong> e autorize uma única vez.</p>
         <p id="auth-error" class="auth-error"></p>
       </div>
     </section>
 
-    <!-- Player Ativo com Capa e Indicador de Play/Pause -->
+    <!-- Hero Card da Música com Capa Grande e Status -->
     <section class="current-track-card" id="track-card">
       <div class="artwork-wrapper">
         <img id="track-artwork" class="track-artwork" src="" alt="Capa" style="display: none;">
@@ -53,7 +67,7 @@
           <span id="playback-state-dot" class="status-dot stopped"></span>
           <span id="playback-state-text" class="status-text">Pronto</span>
         </div>
-        <h4 id="track-title">Carregando música...</h4>
+        <h3 id="track-title">Aguardando música...</h3>
         <p id="track-artist">Abra o YouTube ou selecione uma faixa</p>
       </div>
     </section>
@@ -75,7 +89,7 @@
       </button>
     </section>
 
-    <!-- Modo Automático (Switch com Animação Fluida) -->
+    <!-- Card de Modo Automático -->
     <section class="auto-mode-card">
       <div class="auto-mode-info">
         <div class="auto-mode-title-row">
@@ -98,12 +112,13 @@
       </label>
     </section>
 
-
-    <!-- Seletor Dinâmico de Dispositivos -->
+    <!-- Seletor de Dispositivos Conectados -->
     <section class="device-section">
       <div class="section-title-row">
-        <span class="section-title">DISPOSITIVOS CONECTADOS</span>
-        <button id="refresh-devices-btn" class="btn-refresh" title="Atualizar lista">🔄</button>
+        <span class="section-title">DISPOSITIVOS SPOTIFY CONNECT</span>
+        <button id="refresh-devices-btn" class="btn-refresh" title="Atualizar lista">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor"><path d="M17.65 6.35A7.958 7.958 0 0012 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08A5.99 5.99 0 0112 18c-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>
+        </button>
       </div>
       <div class="device-list" id="device-list">
         <div class="loading-state">Buscando dispositivos...</div>
@@ -114,7 +129,7 @@
     <section class="volume-card">
       <div class="volume-header">
         <span class="volume-icon" id="vol-icon">🔊</span>
-        <span class="volume-title">Volume Master (<span id="target-device-label">Tudo</span>)</span>
+        <span class="volume-title">Volume (<span id="target-device-label">Tudo</span>)</span>
         <span class="volume-value" id="vol-val-text">50%</span>
       </div>
       <div class="volume-slider-container">
@@ -122,7 +137,7 @@
       </div>
     </section>
 
-    <!-- Ação de Handoff Manual -->
+    <!-- Botão de Ação de Handoff Principal -->
     <div class="actions">
       <button id="handoff-btn" class="btn-primary" disabled>
         <span id="handoff-btn-text">▶ Pausar YouTube & Tocar em Tudo</span>
@@ -130,48 +145,53 @@
       </button>
     </div>
 
-    <!-- Debug Mode Toggle -->
-    <section class="auto-mode-card">
-      <div class="auto-mode-info">
-        <div class="auto-mode-title-row">
-          <span class="auto-mode-icon">🐞</span>
-          <span class="auto-mode-title">Debug Mode</span>
+    <!-- Seção Colapsável de Configurações Avançadas e Diagnóstico -->
+    <details id="advanced-settings" class="advanced-details">
+      <summary class="advanced-summary">
+        <span class="advanced-summary-text">⚙ Configurações & Diagnóstico</span>
+        <span class="advanced-arrow">▾</span>
+      </summary>
+      
+      <div class="advanced-content">
+        <!-- Debug Mode Switch -->
+        <div class="advanced-row">
+          <div class="advanced-info">
+            <span class="advanced-label">Debug Mode</span>
+            <p class="advanced-desc">Exibe dados internos e estado do handoff</p>
+          </div>
+          <label class="switch switch-sm">
+            <input type="checkbox" id="debug-mode-toggle">
+            <span class="slider round"></span>
+          </label>
         </div>
-        <p class="auto-mode-desc">Exibir estado interno e detalhes do handoff</p>
-      </div>
-      <label class="switch">
-        <input type="checkbox" id="debug-mode-toggle">
-        <span class="slider round"></span>
-      </label>
-    </section>
 
-    <!-- Debug State Panel (hidden by default) -->
-    <section id="debug-panel" class="telemetry-card hidden">
-      <div class="telemetry-header">
-        <span>🔍 Estado Interno</span>
-      </div>
-      <div class="debug-content" style="font-family:monospace;font-size:10px;color:#bbb;"></div>
-    </section>
+        <!-- Debug State Panel -->
+        <div id="debug-panel" class="debug-panel hidden">
+          <div class="telemetry-header">
+            <span>🔍 Estado Interno</span>
+          </div>
+          <div class="debug-content"></div>
+        </div>
 
-    <!-- Painel de Telemetria e Logs em Tempo Real -->
-    <section class="telemetry-card">
-      <div class="telemetry-header">
-        <span>📡 Telemetria</span>
-        <div style="display:flex;gap:4px;">
-          <button id="copy-logs-btn" class="btn-sm-text" title="Copiar logs">📋</button>
-          <button id="export-logs-btn" class="btn-sm-text" title="Exportar JSON">💾</button>
-          <button id="clear-logs-btn" class="btn-sm-text">Limpar</button>
+        <!-- Painel de Telemetria e Logs -->
+        <div class="telemetry-box">
+          <div class="telemetry-header">
+            <span>📡 Telemetria do Sistema</span>
+            <div class="telemetry-actions">
+              <button id="copy-logs-btn" class="btn-sm-text" title="Copiar logs">📋 Copiar</button>
+              <button id="export-logs-btn" class="btn-sm-text" title="Exportar JSON">💾 Exportar</button>
+              <button id="clear-logs-btn" class="btn-sm-text">Limpar</button>
+            </div>
+          </div>
+          <div id="telemetry-log-list" class="telemetry-list">
+            <div class="log-empty">Nenhum evento registrado ainda.</div>
+          </div>
         </div>
       </div>
-      <div id="telemetry-log-list" class="telemetry-list">
-        <div class="log-empty">Nenhum evento registrado ainda.</div>
-      </div>
-    </section>
+    </details>
 
-    <!-- Status / Notificação -->
+    <!-- Mensagem de Status / Notificação -->
     <div id="status-message" class="status-box hidden"></div>
-
-    <!-- Rodapé -->
   </div>
 
   <script type="module" src="popup.js"></script>

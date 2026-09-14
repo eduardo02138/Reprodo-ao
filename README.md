@@ -53,15 +53,20 @@ Alexa / Echo / Fire TV / grupo "Tudo"
 
 ## Capturas de Tela do Menu
 
-<p align="center">
-  <img src="docs/images/popup-menu-connected.png" width="340" alt="Menu Popup Conectado - Tocando no Spotify e Alexas">
-  &nbsp;&nbsp;&nbsp;&nbsp;
-  <img src="docs/images/popup-menu-setup.png" width="340" alt="Menu Popup - Configuração do Spotify Client ID">
-</p>
+### 🎵 Tocando e Conectado
+
+Menu ativo com reprodução sincronizada em tempo real, grupo de Alexas selecionado, volume master e modo de vídeo configurável:
 
 <p align="center">
-  <em>Esquerda: Menu ativo com reprodução sincronizada, Alexas conectadas e controle de volume.<br>
-  Direita: Card de configuração intuitiva do Spotify Client ID e Redirect URI.</em>
+  <img src="docs/images/popup-menu-connected.png" width="380" alt="Menu Popup Conectado - Tocando no Spotify e Alexas">
+</p>
+
+### 🔐 Configuração Inicial (Spotify Onboarding)
+
+Card expansível para autorização OAuth 2.0 PKCE simplificada com Redirect URI e campo de Client ID:
+
+<p align="center">
+  <img src="docs/images/popup-menu-setup.png" width="380" alt="Menu Popup - Configuração do Spotify Client ID">
 </p>
 
 ---
@@ -123,8 +128,8 @@ Também existem proteções para:
 ### 1. Baixe o projeto
 
 ```bash
-git clone https://github.com/eduardo02138/Reprodo-ao.git
-cd Reprodo-ao
+git clone https://github.com/eduardo02138/youtube-spotify-connect1.git
+cd youtube-spotify-connect1
 ```
 
 ### 2. Carregue a extensão no Chrome
